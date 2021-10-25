@@ -1,8 +1,69 @@
-## helper functions for benchmarking
-require(gGnome)
+#' @import gTrack
+#' @import gGnome
+#' @importFrom skitools rel2abs
+
+#' @name grab.cov.gtrack
+#' @title grab.cov.gtrack
+#'
+#' @description
+#'
+#' create coverage gTrack
+#'
+#' @param cov (character) path to cov.rds
+#' @param jab (character) path to jabba output
+#' @param purity (numeric) estimated purity (overridden by JaBbA)
+#' @param ploidy (numeric) estimated ploidy (overridden by JaBbA)
+#' @param lwd.border (numeric)
+#' @param max.ranges (numeric)
+#' @param name (character)
+#' @param field (character) field in coverage file
+#' @param ... additional params for gTrack
+#'
+#' @return gTrack of coverage
+#' @export
+grab.cov.gtrack = function(cov, jab = NULL,
+                           purity = NULL,
+                           ploidy = NULL,
+                           field = "ratio",
+                           lwd.border = 0.2,
+                           max.ranges = 1e4,
+                           name = "cov",
+                           ...) {
+    if (grepl("txt", cov)) {
+        cov.gr = dt2gr(fread(cov))
+    } else if (grepl("rds", cov)) {
+        cov.gr = readRDS(cov)
+    } else {
+        stop("invalid file name")
+    }
+
+    if (!field %in% names(values(cov.gr))) {
+        stop("invalid field supplied")
+    }
+
+    if (!is.null(jab) && file.exists(jab)) {
+        purity = readRDS(jab)$purity
+        ploidy = readRDS(jab)$ploidy
+    }
+
+    if (!is.null(purity) && !is.null(ploidy)) {
+        cov.gr$cn = skitools::rel2abs(cov.gr, field = field, purity = purity, ploidy = ploidy, allele = FALSE)
+    } else {
+        cov.gr$cn = values(cov.gr)[[field]]
+    }
+
+    cov.gt = gTrack(cov.gr, y.field = "cn",
+                    circles = TRUE,
+                    lwd.border = lwd.border,
+                    max.ranges = max.ranges,
+                    name = name,
+                    ...)
+    cov.gt$legend.params = list(plot = FALSE)
+    return(cov.gt)
+}
 
 #' @name get_consensus
-#' @name get_consensus
+#' @title get_consensus
 #'
 #' @description
 #'
@@ -182,6 +243,7 @@ fused_unfused = function(loose.dt,
 
 
 #' @name grab_loose
+#' @title grab_loose
 #'
 #' @param jabba_rds (character) path to JaBbA
 #' @param mask (character) path to coverage mask
@@ -1245,7 +1307,8 @@ compare_cn = function(gr = NULL, tiles = NULL, nm = "cn", verbose = FALSE) {
 }
     
 #' @name compare_cncp
-#'
+#' @title compare_cncp
+#' 
 #' @description
 #'
 #' compare locations of CN change points given by two GRanges objects
