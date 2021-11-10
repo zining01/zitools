@@ -6,11 +6,16 @@
 \usage{
 grab_loose(
   jabba_rds,
-  loose_ends = NA_character_,
+  coverage = "/dev/null",
+  tumor_coverage = coverage,
+  norm.field = "norm.counts",
+  tumor.field = "foreground",
+  cov.pad = 1e+05,
   mask = "~/projects/gGnome/files/new.mask.rds",
   mask_pad = 10000,
-  bad_thresh = 0.4,
+  bad_thresh = NA,
   norm_thresh = 0.6,
+  corr_thresh = 1,
   min_size = 50000,
   subset = FALSE,
   verbose = TRUE
@@ -19,13 +24,21 @@ grab_loose(
 \arguments{
 \item{jabba_rds}{(character) path to JaBbA}
 
+\item{coverage}{(character) path to coverage file with gc-adjusted counts}
+
+\item{norm.field}{(character) normal count field (norm.counts)}
+
+\item{tumor.field}{(character) coverage field (ratio)}
+
 \item{mask}{(character) path to coverage mask}
 
 \item{mask_pad}{(numeric) pad on distance to mask}
 
-\item{bad_thresh}{(numeric) default 0.3}
+\item{bad_thresh}{(numeric) default NA (skip this)}
 
 \item{norm_thresh}{(numeric) 0.6 (from filter.loose)}
+
+\item{corr_thresh}{(numeric) 0.5 autocorrelation threshold}
 
 \item{min_size}{(numeric) minimum size in BP}
 

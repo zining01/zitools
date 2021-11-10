@@ -44,5 +44,8 @@ pp_tile(
 data.table of tiled genome with mean
 }
 \description{
-pp_tile
+tiles an input JaBbA graph or karyograph into bins of size tile.width
+
+Creates a data.table representing tiled genome with column $cn
+This can be used as input to pp_plot to QC purity/ploidy estimates
 }
