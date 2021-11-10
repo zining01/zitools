@@ -1,9 +1,249 @@
+#' @import data.table
+#' @import GenomicRanges
+#' @import ggplot2
 #' @import gTrack
 #' @import gGnome
-#' @importFrom skitools rel2abs
+#' @import gUtils
+#' @importFrom igraph graph.adjacency shortest_paths
+#' @importFrom rtracklayer import import.bw
+#' @importFrom skitools rel2abs ppng
 
-#' @name grab.cov.gtrack
-#' @title grab.cov.gtrack
+#' @name ecycles
+#' @title ecycles
+#'
+#' @description
+#'
+#' Return a data table of all ALT edges in a gGraph that is part of a simple cycle
+#'
+#' @param junctions (character) path to junctions file or GRangesList
+#' @param jabba_rds (character) path to JaBbA output
+#' @param thresh (numeric) distance threshold for reciprocality, default 1e3 (bp)
+#' @param min.span (numeric) thres for removing small dups and dels (1e3 bp)
+#' @param chunksize (numeric) default 1e30
+#' @param mc.cores (numeric) default 1
+#' @param verbose (logical) default FALSE
+#'
+#' @return data.table with columns cycle.id, edge.id, class, junction
+#' @export
+ecycles = function(junctions = NULL, jabba_rds = NULL, thresh = 1e3,
+                   min.span = 1e3,
+                   chunksize = 1e30, mc.cores = 1, verbose = FALSE) {
+
+    ## empty output
+    res = data.table(cycle.id = numeric(),
+                     edge.id = numeric(),
+                     class = character(),
+                     junction = character())
+
+    ## check if gGraph should be created from junctions
+    if (check_file(junctions)) {
+        if (verbose) {
+            message("reading junctions supplied in: ", junctions)
+        }
+        if (grepl(".rds$", junctions)) {
+            jj = readRDS(junctions)
+            if (inherits(jj, 'GRangesList')) {
+                jj = jJ(jj)
+            }
+        } else {
+            jj = jJ(rafile = junctions)
+        }
+        if (verbose) {
+            message("Creating gGraph from junctions")
+        }
+        gg = gG(junctions = jj)
+    } else if (check_file(jabba_rds)) {
+        if (verbose) {
+            message("Reading gGraph from: ", jabba_rds)
+        }
+        gg = gG(jabba = jabba_rds)
+    } else {
+        stop("Must supply junctions or jabba_rds")
+    }
+
+
+    ## remove small dups and dels
+    espans = gg$junctions[type == "ALT"]$span
+    eclass = gg$junctions[type == "ALT"]$dt$class
+    ggjuncs = gg$junctions[type == "ALT"][espans > min.span | eclass == "INV-like" | eclass == "TRA-like"]
+    if (verbose){
+        message("Number of junctions after removing small dups and dels: ", length(ggjuncs))
+    }
+    gg = gG(junctions = ggjuncs)
+    ## code copied from eclusters
+    altedges = gg$edges[type == "ALT"]
+
+    if (!length(altedges)) {
+        if (verbose) {
+            message("No ALT edges!")
+        }
+        return(res)
+    }
+    
+    bp = grl.unlist(altedges$grl)[, c("grl.ix", "grl.iix")]
+    bp.dt = gr2dt(bp)
+
+    ix = split(1:length(bp), ceiling(runif(length(bp))*ceiling(length(bp)/chunksize)))
+    ixu = unlist(ix)
+    eps = 1e-9
+    ij = do.call(rbind, split(1:length(bp), bp$grl.ix))
+    xt.adj = old.adj = Matrix::sparseMatrix(1, 1, x = 0, dims = rep(length(bp), 2))
+
+    if (verbose){
+        message(sprintf('Computing junction graph across %s ALT edges with distance threshold %s', length(altedges), thresh))
+    }
+
+    if (!exists(".INF")){
+        .INF = pmax(sum(seqlengths(gg)), 1e9)
+    }
+    xt.adj[ixu, ] = do.call(rbind,
+                            mclapply(ix,
+                                     function(iix)
+                                     {
+                                         if (verbose>1)
+                                             cat('.')
+                                         tmpm =
+                                             gr.dist(bp[iix],
+                                                     gr.flipstrand(bp),
+                                                     ignore.strand = FALSE)+eps
+                                         return(as(tmpm, "Matrix"))
+                                     },
+                                     mc.cores = mc.cores))
+    ## get back to marcin's version
+    adj = xt.adj
+    adj[which(is.na(as.matrix(adj)))] = 0
+    adj[which(as.matrix(adj)>thresh)] = 0
+
+    xt.adj[which(is.na(as.matrix(xt.adj)))] = .INF + 1
+    ## two breakpoints of the same junction should be distance 1
+    bp.pair = t(
+        sapply(unique(bp$grl.ix),
+               function(ix){
+                   matrix(which(bp$grl.ix==ix), ncol=2, nrow=1)
+               }))
+    xt.adj[bp.pair] = 1
+
+    ## do single linkage hierarchical clustering within `range`
+    hcl = stats::hclust(as.dist(xt.adj), method = "single")
+    hcl.lbl = cutree(hcl, h = thresh)
+    bp.dt$hcl = hcl.lbl
+    bp.hcl =
+        bp.dt[,.(hcl.1 = .SD[grl.iix==1, hcl],
+                 hcl.2 = .SD[grl.iix==2, hcl]),
+              keyby=grl.ix]
+
+    ## sometimes two breakpoints belong to diff hcl
+    ## merge them!
+    altedges$mark(hcl.1 = bp.hcl[.(seq_along(altedges)), hcl.1])
+    altedges$mark(hcl.2 = bp.hcl[.(seq_along(altedges)), hcl.2])
+    hcl.ig = igraph::graph_from_edgelist(
+        bp.hcl[, unique(cbind(hcl.1, hcl.2))], directed = FALSE)
+    hcl.comp = components(hcl.ig)
+    altedges$mark(ehcl = as.integer(hcl.comp$membership)[bp.hcl[, hcl.1]])
+
+    ## connect to MI's code
+    adj[adj>thresh] = 0
+
+    ## check bp pairs to see if they are actually reference connected (ignore.strand = TRUE)
+    ## on the given graphs ...
+    ## which if we have many graphs overlapping the same intervals
+    ## may not actually be the case
+    ## we only check connectivity using ref edges
+
+    ## compute reference graph distance and
+    ## remove any bp pairs that are farther away
+    ## on the reference graph than on the
+    ## linear reference
+
+    ##FIX ME: can't handle when there are no reference edges
+    refg = gg[, type == "REF"]##self[, type == 'REF']
+    bpp = Matrix::which(adj!=0, arr.ind = TRUE)
+
+    bpp1 = unique(bpp[,1])
+    bpp2 = unique(bpp[,2])
+    ## dref = gGnome:::pdist(bp[bpp[,1]], bp[bpp[,2]])
+    dref.unique = gGnome:::pdist(bp[bpp1], bp[bpp2])
+    ##drefg = diag(refg$dist(bp[bpp[,1]], bp[bpp[,2]]))
+    drefg.unique = diag(refg$dist(bp[bpp1], bp[bpp2]))
+    dref = dref.unique[match(bpp[, 1],bpp1)]
+    drefg = drefg.unique[match(bpp[, 1],bpp1)]
+
+    ix = drefg>dref
+    if (any(ix))
+        adj[bpp[ix,, drop = FALSE]] = FALSE
+    if (verbose>1)
+        cat('\n')
+
+    adj = adj | Matrix::t(adj) ## symmetrize
+
+
+    ## bidirected graph --> skew symmetric directed graph conversion
+    ## split each junction (bp pair) into two nodes, one + and -
+    ## arbitrarily call each bp1-->bp2 junction is "+" orientation
+    ## then all odd proximities adjacent to bp1 will enter the "+"
+    ## version of that junction and exit the "-" version
+
+    ## new matrix will be same dimension as adj
+    ## however the nodes will represents + and -
+    ## orientation of junctions
+    ## using the foollowing conversion
+
+    ## i.e.
+    ## bp2 --> bp1 + +
+    ## bp2 --> bp2 + -
+    ## bp1 --> bp1 - +
+    ## bp1 --> bp2 - -
+
+    ## we'll use the same indices just to keep things confusing
+    junpos = bp1 = bp$grl.iix == 1
+    junneg = bp2 = bp$grl.iix == 2
+
+    adj2 = adj & FALSE ## clear out adj for new skew symmetric version
+    adj2[junpos, junpos] = adj[bp2, bp1]
+    adj2[junpos, junneg] = adj[bp2, bp2]
+    adj2[junneg, junpos] = adj[bp1, bp1]
+    adj2[junneg, junneg] = adj[bp1, bp2]
+
+    if (verbose)
+        message(sprintf('Created basic junction graph using distance threshold of %s', thresh))
+
+    ## get nonzero entries adjacency matrix as a data table
+    dt = as.data.table(Matrix::which(adj2, arr.ind = TRUE))
+    ## iterate over unique in the data table
+    unique.fr = unique(dt$row)
+    ## create graph from the corresponding adjacency matrix outside of loop
+    gr = graph.adjacency(adj2)
+    ## list tracking nodes of each cycle
+    all.cy = list()
+    ## number of cycles in the graph
+    num.cy = 0
+    for (rw in unique.fr) {
+        fr = dt[row == rw, col]
+        cy = igraph::shortest_paths(gr, from = fr, to = rw)$vpath
+        sel = which(sapply(cy, length) > 1)
+        for (ix in sel) {
+            num.cy = num.cy + 1
+            all.cy[[num.cy]] = sort(as.numeric(cy[sel][[ix]]))
+        }
+    }
+
+    if (!length(all.cy)) {
+        if (verbose) {
+            message("No cycles found!")
+        }
+        return(res)
+    } 
+    unique.cy = unique(all.cy)
+    jcl = lapply(unique.cy, function(x) unique(sort(bp$grl.ix[x]))) %>% unique
+    dcl = dunlist(unname(jcl)) %>% setnames(new = c('listid', 'edges'))
+    dcl[, class := altedges$dt[dcl$edges, class]]
+    dcl[, junction := grl.string(altedges$grl[dcl$edges])]
+    return(dcl)
+}
+
+
+#' @name grab_cov_gtrack
+#' @title grab_cov_gtrack
 #'
 #' @description
 #'
@@ -241,57 +481,140 @@ fused_unfused = function(loose.dt,
     return(res)
 }
 
+#' @name gg_loose_end
+#' @title gg_loose_end
+#'
+#' @param jabba_rds (character) path to jabba output
+#' @param return.type (character) one of GRanges, data.table
+#' 
+#' @return loose ends of a JaBbA graph as GRanges
+#' if gGraph is not balanced, will produce a warning and return empty GRanges
+gg_loose_end = function(jabba_rds = NA_character_, return.type = "GRanges") {
+    
+    if (!check_file(jabba_rds)) {
+        stop("file does not exist: ", jabba_rds)
+    }
+    
+    gg = gG(jabba = jabba_rds)
+
+    if (is.null(gg$nodes$dt$loose.cn.left) | is.null(gg$nodes$dt$loose.cn.right)) {
+        stop("gg missing field loose.cn.left and loose.cn.right. please check if graph if balanced.")
+    }
+
+    ll = gr2dt(gr.start(gg$nodes[!is.na(cn) & loose.cn.left>0]$gr))[, ":="(lcn = loose.cn.left,
+                                                                           strand = "+")]
+    lr = gr2dt(gr.end(gg$nodes[!is.na(cn) & loose.cn.right>0]$gr))[, ":="(lcn = loose.cn.right,
+                                                                           strand = "-")]
+    if (nrow(ll)) {
+        ll[, ":="(lcn = loose.cn.left, strand = "+")]
+    }
+
+    if (nrow(lr)) {
+        lr[, ":="(lcn = loose.cn.right, strand = "-")]
+    }
+
+    all.loose.dt = rbind(ll, lr, fill = TRUE)
+
+
+    if (return.type == "GRanges") {
+        all.loose.gr = dt2gr(all.loose.dt, seqlengths = seqlengths(gg))
+        return(all.loose.gr)
+    }
+    return(all.loose.dt)
+}
 
 #' @name grab_loose
 #' @title grab_loose
 #'
 #' @param jabba_rds (character) path to JaBbA
+#' @param coverage (character) path to coverage file with gc-adjusted counts
+#' @param tumor.field (character) coverage field (ratio)
+#' @param norm.field (character) normal count field (norm.counts)
 #' @param mask (character) path to coverage mask
 #' @param mask_pad (numeric) pad on distance to mask
-#' @param bad_thresh (numeric) default 0.3
+#' @param bad_thresh (numeric) default NA (skip this)
 #' @param norm_thresh (numeric) 0.6 (from filter.loose)
+#' @param corr_thresh (numeric) 0.5 autocorrelation threshold
 #' @param min_size (numeric) minimum size in BP
 #' @param subset (logical) subset loose ends to include only valid ones before returning
 #' @param verbose (logical)
 grab_loose = function(jabba_rds,
-                      loose_ends = NA_character_,
+                      coverage = "/dev/null",
+                      tumor_coverage = coverage,
+                      norm.field = 'norm.counts',
+                      tumor.field = 'foreground',
+                      cov.pad = 1e5,
                       mask = "~/projects/gGnome/files/new.mask.rds",
                       mask_pad = 1e4,
-                      bad_thresh = 0.4,
+                      bad_thresh = NA,##0.4,
                       norm_thresh = 0.6,
+                      corr_thresh = 1, ## autocorrelation threshold
                       min_size = 5e4,
                       subset = FALSE,
                       verbose = TRUE) {
 
-    if (is.null(jabba_rds) || !file.exists(jabba_rds)) {
+    if (!check_file(jabba_rds)) {
         stop("JaBbA file path not valid")
     }
 
     jabba_rds = file.path(dirname(jabba_rds), "jabba.raw.rds")
     jabba_simple_rds = file.path(dirname(jabba_rds), "jabba.simple.rds")
 
-    ## grab loose ends from provided path
-    if (is.na(loose_ends)) {
-        loose_ends = file.path(dirname(jabba_rds), "loose.end.stats.rds")
+    if (!check_file(coverage)) {
+        if (verbose) {
+            message("Coverage file not supplied!")
+        }
+        use.coverage = FALSE
+    } else {
+        if (verbose) {
+            message("Reading normal coverage")
+        }
+        cov.gr = readRDS(coverage)
+        use.coverage = TRUE
     }
 
-    if (!file.exists(loose_ends)) {
-        warning("No loose end file!")
-        return(data.table())
+    if (!check_file(tumor_coverage)) {
+        if (verbose) {
+            message("Tumor coverage file not valid")
+        }
+        use.tumor.coverage = FALSE
+    } else {
+        if (verbose) {
+            message("Reading tumor coverage.")
+        }
+        use.tumor.coverage = TRUE
+        tum.cov.gr = readRDS(tumor_coverage)
+    }
+
+    if (use.coverage) {
+        if (!(norm.field %in% names(values(cov.gr)))) {
+            stop("supplied field not in coverage metadata: ", norm.field)
+        }
+        cov.gr = cov.gr %Q% (!is.infinite(values(cov.gr)[[norm.field]]))
+    }
+
+    if (use.tumor.coverage) {
+        if (!(tumor.field %in% names(values(tum.cov.gr)))) {
+            stop("supplied field not in tumor_coverage metadata: ", tumor.field)
+        }
+        tum.cov.gr = tum.cov.gr %Q% (!is.infinite(values(tum.cov.gr)[[tumor.field]]))
+    }
+
+    ## pull loose ends from jabba_rds
+    if (verbose) {
+        message("Grabbing loose ends from JaBbA input")
+    }
+    le.gr = gg_loose_end(jabba_rds, return.type = 'GRanges')
+    le.dt = as.data.table(le.gr)
+
+    if (!nrow(le.dt)) {
+        if (verbose) {
+            message("No loose ends!")
+        }
+        return(le.dt)
     }
     
-    le.dt = readRDS(loose_ends)
-    le.dt[, loose.index := 1:.N]
-    le.gr = dt2gr(le.dt[, .(seqnames, start, end, loose.index)])
-
-    ## check if there is CN change in the normal
-    cnames = c("nestimate", "effect.thresh")
-    if (all(cnames) %in% colnames(le.dt)) {
-        le.dt[, normal.change := abs(nestimate) < 0.6 * effect.thresh]
-    } else {
-        warning("Loose ends table missing columns nestimate and effect.thresh")
-        le.dt[, normal.change := FALSE]
-    }
+    le.gr$loose.index = 1:length(le.gr)
 
     ## check if loose end overlaps mask
     if (file.exists(mask)) {
@@ -301,12 +624,100 @@ grab_loose = function(jabba_rds,
     }
 
     ## get node ids of fused and unfused loose ends
+    if (verbose) {
+        message("Identifying fused and unfused sides of each loose end")
+    }
+    
     fused.unfused.dt = fused_unfused(le.dt, jabba_rds)
     simple.fused.unfused.dt = fused_unfused(le.dt, jabba_simple_rds)
 
     ## grab gGraph
     gg = gG(jabba = jabba_rds)
     gg.simple = gG(jabba = jabba_simple_rds)
+
+    ## get flanking normal coverage (borrowed from filter.loose)
+    fused.melted.dt = melt.data.table(fused.unfused.dt, id.vars = "loose.index",
+                                   measure.vars = c("fused.node.id", "unfused.node.id"),
+                                   variable.name = "fused",
+                                   value.name = "node.id")[!is.na(node.id),]
+    
+    segs.gr = gg$nodes$gr[fused.melted.dt$node.id, c()]
+    segs.gr$loose.index = fused.melted.dt$loose.index
+    segs.gr$fused = fused.melted.dt$fused == "fused.node.id"
+
+    
+    ## extend fused and unfused size 100 mbp in each direction, then overlap with coverage
+    sides.gr = gr.findoverlaps(segs.gr, le.gr + cov.pad, by = 'loose.index')
+    values(sides.gr) = cbind(values(sides.gr), values(le.gr[sides.gr$subject.id]))
+    sides.gr$fused = segs.gr$fused[sides.gr$query.id]
+
+    if (use.coverage) {
+
+        ## overlap with normal coverage
+        sides.cov.dt = gr.findoverlaps(cov.gr, sides.gr, return.type = 'data.table')
+        sides.cov.dt[, normal.cov := values(cov.gr)[[norm.field]][query.id]]
+        sides.cov.dt[, fused := values(sides.gr)$fused[subject.id]]
+        sides.cov.dt[, loose.index := values(sides.gr)$loose.index[subject.id]]
+
+    }
+
+    if (use.tumor.coverage) {
+
+        ## get tumor coverage to compute autocorrelation
+        tumor.cov.dt = gr.findoverlaps(tum.cov.gr, sides.gr, return.type = 'data.table')
+        tumor.cov.dt[, tumor.cov := values(tum.cov.gr)[[tumor.field]][query.id]]
+        tumor.cov.dt[, fused := values(sides.gr)$fused[subject.id]]
+        tumor.cov.dt[, loose.index := values(sides.gr)$loose.index[subject.id]]
+
+        ## compute waviness at loose ends
+        if(verbose) {
+            message("Calculating waviness around loose end")
+        }
+        ## autocorrelation.dt = tumor.cov.dt[, .(waviness = max(.waviness(start[fused], tumor.cov[fused]),
+        ##                                                      .waviness(start[!fused], tumor.cov[!fused]),
+        ##                                                      na.rm=T)), by=loose.index]
+
+        tumor.cov.dt[, count := .N, by = .(loose.index, fused)]
+        autocorrelation.dt = tumor.cov.dt[count > 1,
+                                          .(autocorr = max(as.numeric(acf(tumor.cov)$acf)[-1],
+                                                           na.rm = TRUE)),
+                                          by = .(fused, loose.index)][, .(autcorr = max(autocorr, na.rm = T)),
+                                                                      by = loose.index]
+
+        ## add autocorrelation info
+        le.dt[, autocorrelation := autocorrelation.dt$autcorr[match(loose.index, autocorrelation.dt$loose.index)]]
+        le.dt[, highcorr := autocorrelation >= corr_thresh]
+
+    } else {
+
+        if (verbose) {
+            message("Skipping autocorrelation calculation as no coverage supplied")
+        }
+        le.dt[, autocorrelation := NA]
+        le.dt[, highcorr := FALSE]
+    }
+
+    if (use.coverage) {
+        ## compute mean coverage for fused and unfused sides
+        mean.cov.dt = sides.cov.dt[, .(mean.normal.cov = mean(normal.cov, na.rm = T)),
+                                   by = .(loose.index, fused)]
+        mean.cov.dt[, fused := ifelse(fused, 'fused', 'unfused')]
+        mean.cov.dt = dcast.data.table(mean.cov.dt, loose.index ~ fused, value.var = "mean.normal.cov")
+
+        ## determine whether it's higher than normal beta but only consider only diploid chr
+        autosomal.chrs = grep("(^(chr)*[0-9]+$)", names(seqlengths(cov.gr)), value = TRUE)
+        norm.beta = mean(as.data.table(cov.gr)[seqnames %in% autosomal.chrs,][[norm.field]], na.rm = TRUE) * 0.5 ## factor of 0.5 is for allelic CN
+        mean.cov.dt[, norm.change := norm_thresh * norm.beta < abs(fused - unfused)]
+
+        ## mark normal change and copy normal fused and unfused coverage
+        le.dt$norm.change = le.dt$loose.index %in% mean.cov.dt[(norm.change), loose.index]
+        le.dt$norm.fused = mean.cov.dt$fused[match(le.dt$loose.index, mean.cov.dt$loose.index)]
+        le.dt$norm.unfused = mean.cov.dt$unfused[match(le.dt$loose.index, mean.cov.dt$loose.index)]
+    } else {
+        le.dt$norm.change = FALSE
+        le.dt$norm.fused = NA
+        le.dt$norm.unfused = NA
+    }
     
     ## get size of loose end
     simple.fused.unfused.dt[, fused.size := gg.simple$nodes$dt$width[fused.node.id]]
@@ -314,27 +725,37 @@ grab_loose = function(jabba_rds,
     simple.fused.unfused.dt[, size := pmin(fused.size, unfused.size, na.rm = TRUE)]
     simple.fused.unfused.dt[, small := size <= min_size]
 
-    ## get CN of each side of loose end
+    ## ## get CN of each side of loose end
     fused.unfused.dt[, fused.cn := gg$nodes$dt$cn[fused.node.id]]
     fused.unfused.dt[, unfused.cn := gg$nodes$dt$cn[unfused.node.id]]
     fused.unfused.dt[, fused.lower := (fused.cn <= unfused.cn)]
 
     ## check whether this sample overlaps a bad part of the coverage
-    fused.unfused.dt[, fused.cn.old := gg$nodes$dt$cn.old[fused.node.id]]
-    fused.unfused.dt[, unfused.cn.old := gg$nodes$dt$cn.old[unfused.node.id]]
-    
+    ## fused.unfused.dt[, fused.cn.old := gg$nodes$dt$cn.old[fused.node.id]]
+    ## fused.unfused.dt[, unfused.cn.old := gg$nodes$dt$cn.old[unfused.node.id]]
 
     ## merge these with loose ends
-    le.dt = merge.data.table(le.dt, fused.unfused.dt, by = "loose.index", all.x = TRUE)
+     le.dt = merge.data.table(le.dt, fused.unfused.dt, by = "loose.index", all.x = TRUE)
     le.dt = merge.data.table(le.dt,
                              simple.fused.unfused.dt[, .(loose.index, fused.size, unfused.size, size, small)],
                              by = "loose.index", all.x = TRUE)
 
-    ## indicate whether to "keep"
-    le.dt[, coverage.bad := FALSE]
-    le.dt[!is.na(fused.cn.old) & fused.size > unfused.size, coverage.bad := fused.cn - fused.cn.old > bad_thresh]
-    le.dt[!is.na(unfused.cn.old) & fused.size < unfused.size, coverage.bad := unfused.cn.old - unfused.cn > bad_thresh]
-    le.dt[, keep := (!(mask) & !(normal.change) & !(fused.lower) & !(coverage.bad) & !(small))]
+    ## ## indicate whether to "keep"
+    ## le.dt[, coverage.bad := FALSE]
+    ## if (!is.na(bad_thresh)) {
+    ##     le.dt[!is.na(fused.cn.old) & fused.size > unfused.size,
+    ##           coverage.bad := fused.cn - fused.cn.old > bad_thresh]
+    ##     le.dt[!is.na(unfused.cn.old) & fused.size < unfused.size,
+    ##           coverage.bad := unfused.cn.old - unfused.cn > bad_thresh]
+    ## } else {
+    ##     le.dt[, coverage.bad := FALSE]
+    ## }
+    
+    le.dt[, keep := (!(mask) & !(norm.change) & !(fused.lower) & !(small) & !(highcorr))]
+
+    ## add stringified loose end
+    loose.end.str = gr.string(dt2gr(le.dt[, .(seqnames, start, end, strand)]))
+    le.dt[, loose.end := paste0(seqnames, ":", start, strand)]
 
     return(le.dt)
 }
@@ -342,6 +763,11 @@ grab_loose = function(jabba_rds,
 
 #' @name pp_tile
 #' @title pp_tile
+#'
+#' @description tiles an input JaBbA graph or karyograph into bins of size tile.width
+#'
+#' Creates a data.table representing tiled genome with column $cn
+#' This can be used as input to pp_plot to QC purity/ploidy estimates
 #'
 #' @param seg (character) path to input segmentation
 #' @param cov (character) path to coverage file
@@ -752,6 +1178,7 @@ compare_jabba_cn = function(gg1 = NULL, gg2 = NULL,
 #' This is a function that compares segment CNs to a gold standard.
 #'
 #' @param seg (character) path to seg file
+#' @param gr (GRanges) allow GRanges input directly
 #' @param gs (character) path to gold standard segs
 #' @param method (character) analysis method (one of jabba, ascat)
 #' @param tile.width (numeric) resolution at which to tile the genome for correlation. Default 1e4.
@@ -762,6 +1189,7 @@ compare_jabba_cn = function(gg1 = NULL, gg2 = NULL,
 #'
 #' @return list with entries $cncp.gr $cncp.res
 cn_analysis = function(seg = NULL,
+                       gr = NULL,
                        gs = NULL,
                        method = "jabba",
                        id = "sample",
@@ -776,20 +1204,31 @@ cn_analysis = function(seg = NULL,
 
     gs.gr = grab_segs(gr = gs, field = "cn", simplify = TRUE, verbose = verbose)
 
-    if (grepl(pattern = "ascat", x = method, ignore.case = TRUE)) {
-        method.gr = grab_segs(bw = seg, field = "score",
-                              simplify = TRUE,
-                              verbose = verbose)
-    } else if (grepl(pattern = "jabba", x = method, ignore.case = TRUE)) {
-        method.gr = grab_segs(gg = seg, field = "cn",
-                              simplify = TRUE,
-                              verbose = verbose)
-    } else if (grepl(pattern = "sequenza", x = method, ignore.case = TRUE)) {
-        method.gr = grab_segs(csv = seg, field = "CNt",
-                              simplify = TRUE,
-                              verbose = verbose)
+    if (is.null(gr)) {
+
+        if (grepl(pattern = "ascat", x = method, ignore.case = TRUE)) {
+            method.gr = grab_segs(bw = seg, field = "score",
+                                  simplify = TRUE,
+                                  verbose = verbose)
+        } else if (grepl(pattern = "jabba", x = method, ignore.case = TRUE)) {
+            method.gr = grab_segs(gg = seg, field = "cn",
+                                  simplify = TRUE,
+                                  verbose = verbose)
+        } else if (grepl(pattern = "sequenza", x = method, ignore.case = TRUE)) {
+            method.gr = grab_segs(csv = seg, field = "CNt",
+                                  simplify = TRUE,
+                                  verbose = verbose)
+        } else {
+            stop("method not implemented yet")
+        }
+    } else if (inherits(gr, 'GRanges')) {
+        if ('cn' %in% names(values(gr))) {
+            method.gr = gr[, 'cn']
+        } else {
+            stop('supplied granges missing field cn')
+        }
     } else {
-        stop("method not implemented yet")
+        stop("invalid input for gr")
     }
 
     ## remove centromeric regions
@@ -947,18 +1386,17 @@ overlap_breakpoints_with_jabba = function(gr = GRanges(), jabba_rds = NA_charact
         message("Grabbing loose ends from JaBbA")
     }
     
-    gg.loose.dt = grab_loose(jabba_rds = jabba_rds, mask = mask, mask_pad = mask.pad, subset = TRUE)
-    if (nrow(gg.loose.dt)) {
-        gg.loose.gr = dt2gr(gg.loose.dt)
-    } else {
-        gg.loose.gr = GRanges()
-    }
+    gg.loose.gr = gg_loose_end(jabba_rds = jabba_rds, return.type = 'GRanges')
 
     if (verbose) {
         message("Grabbing junction breakpoints from JaBbA")
     }
     bp.gr = GRanges()
-    all.alt.junctions = gg$junctions[type == "ALT" & cn > 0]
+    if (length(gg$junctions)) {
+        all.alt.junctions = gg$junctions[type == "ALT" & cn > 0]
+    } else {
+        all.alt.junctions = jJ()
+    }
     if (length(all.alt.junctions)) {
         large.sv.ix = which(all.alt.junctions$span > min.footprint)
         if (length(large.sv.ix)) {
@@ -1292,12 +1730,13 @@ compare_cn = function(gr = NULL, tiles = NULL, nm = "cn", verbose = FALSE) {
     tiles = gr.fix(tiles, sl)
     
     ## make these consistent
-    gr = gr[which(seqnames(gr) %in% seqnames(tiles))]
+    gr = gr[which(as.character(seqnames(gr)) %in% unique(as.character(seqnames(tiles))))]
     ## seqinfo(gr) = seqinfo(tiles)
     ## seqlengths(gr) = seqlengths(tiles)
 
     gr.ov = gr.findoverlaps(query = gr, subject = tiles, qcol = "cn",
                             return.type = "data.table")
+
 
     gr.ov[, width := end - start]
     gr.ov = gr.ov[!is.na(width) & width > 0, .(cn = weighted.mean(cn, width, na.rm = T)), by = subject.id]
