@@ -8,6 +8,61 @@
 #' @importFrom rtracklayer import import.bw
 #' @importFrom skitools rel2abs ppng
 
+#' @name gg2jab
+#' @title gg2jab
+#'
+#' @description
+#'
+#' Hacky way to make a JaBbA-like output from a gGraph
+#'
+#' @param gg (gGraph)
+#' @param purity (numeric) overwrite automated purity (default 1)
+#' @param ploidy (numeric) overwrite automated purity ploidy calculation
+#' @return list with names:
+#' - segstats (GRanges, signed)
+#' - adj (adjacency matrix)
+#' - ab.edges (array)
+#' - purity (numeric)
+#' - ploidy (numeric)
+#' - junctions (GRangesList)
+gg2jab = function(gg, purity = NA, ploidy = NA) {
+
+    if (!inherits(gg, 'gGraph')) {
+        stop("Must supply gGraph")
+    }
+
+    ## create ab.edges object
+    ab.edges = array(NA, dim = c(length(gg$junctions[type == "ALT"]), 3, 2),
+                     dimnames = list(NULL, c('from', 'to', 'edge.ix'), c('+', '-')))
+    ab.edges[, 1, 1] = gg$sedgesdt[sedge.id > 0][match(gg$junctions[type == "ALT"]$dt$edge.id, edge.id), from]
+    ab.edges[, 2, 1] = gg$sedgesdt[sedge.id > 0][match(gg$junctions[type == "ALT"]$dt$edge.id, edge.id), to]
+    ab.edges[, 3, 1] = gg$junctions[type == "ALT"]$dt$edge.id
+    ab.edges[, 1, 2] = gg$sedgesdt[sedge.id < 0][match(gg$junctions[type == "ALT"]$dt$edge.id, edge.id), from]
+    ab.edges[, 2, 2] = gg$sedgesdt[sedge.id < 0][match(gg$junctions[type == "ALT"]$dt$edge.id, edge.id), to]
+    ab.edges[, 3, 2] = gg$junctions[type == "ALT"]$dt$edge.id
+
+    ## initalize output which is a list
+    res = list(segstats = gg$gr,
+               adj = gg$adj,
+               junctions = gg$junctions[type == "ALT"]$grl,
+               ab.edges = ab.edges)
+
+    ## calculate purity/ploidy if not supplied
+    if (!is.na(ploidy)) {
+        res$ploidy = ploidy
+    } else {
+        res$ploidy = weighted.mean(gg$nodes$dt[, cn], gg$nodes$dt[, width], na.rm = TRUE)
+    }
+
+    if (!is.na(purity)) {
+        res$purity = purity
+    } else {
+        res$purity = 1
+    }
+
+    return(res)
+}
+
 #' @name ecycles
 #' @title ecycles
 #'
@@ -15,19 +70,29 @@
 #'
 #' Return a data table of all ALT edges in a gGraph that is part of a simple cycle
 #'
-#' @param junctions (character) path to junctions file or GRangesList
+#' @param junctions (character) path to junctions file or GRangesList with field tier
+#' @param tfield (character)
 #' @param jabba_rds (character) path to JaBbA output
+#' @param small.inv (logical) allow small inversions? default FALSE
 #' @param thresh (numeric) distance threshold for reciprocality, default 1e3 (bp)
 #' @param min.span (numeric) thres for removing small dups and dels (1e3 bp)
 #' @param chunksize (numeric) default 1e30
+#' @param tier2.only (logical) only keep cycles with at least 1 tier 2 junction
 #' @param mc.cores (numeric) default 1
 #' @param verbose (logical) default FALSE
 #'
 #' @return data.table with columns cycle.id, edge.id, class, junction
 #' @export
-ecycles = function(junctions = NULL, jabba_rds = NULL, thresh = 1e3,
-                   min.span = 1e3,
-                   chunksize = 1e30, mc.cores = 1, verbose = FALSE) {
+ecycles = function(junctions = NULL,
+                   tfield = 'tier',
+                   jabba_rds = NULL,
+                   small.inv = FALSE, ## FALSE as we are not interested in fbi here?
+                   thresh = 1e4,
+                   min.span = 1e4,
+                   chunksize = 1e30,
+                   tier2.only = TRUE,
+                   mc.cores = 1,
+                   verbose = FALSE) {
 
     ## empty output
     res = data.table(cycle.id = numeric(),
@@ -65,9 +130,22 @@ ecycles = function(junctions = NULL, jabba_rds = NULL, thresh = 1e3,
     ## remove small dups and dels
     espans = gg$junctions[type == "ALT"]$span
     eclass = gg$junctions[type == "ALT"]$dt$class
-    ggjuncs = gg$junctions[type == "ALT"][espans > min.span | eclass == "INV-like" | eclass == "TRA-like"]
+    if (small.inv) {
+        if (verbose) {
+            message("Allowing small inversions but removing small dups and dels under ",
+                    min.span, " bp")
+        }
+        ggjuncs = gg$junctions[type == "ALT"][espans > min.span |
+                                              eclass == "INV-like" |
+                                              eclass == "TRA-like"]
+    } else {
+        if (verbose) {
+            message("Not allowing small inversions, dups, or dels under ", min.span, " bp")
+        }
+        ggjuncs = gg$junctions[type == "ALT"][espans > min.span | eclass == "TRA-like"]
+    }
     if (verbose){
-        message("Number of junctions after removing small dups and dels: ", length(ggjuncs))
+        message("Number of junctions after removing low-span junctions: ", length(ggjuncs))
     }
     gg = gG(junctions = ggjuncs)
     ## code copied from eclusters
@@ -238,6 +316,15 @@ ecycles = function(junctions = NULL, jabba_rds = NULL, thresh = 1e3,
     dcl = dunlist(unname(jcl)) %>% setnames(new = c('listid', 'edges'))
     dcl[, class := altedges$dt[dcl$edges, class]]
     dcl[, junction := grl.string(altedges$grl[dcl$edges])]
+    if (tfield %in% colnames(altedges$dt)) {
+        dcl[, tier := altedges$dt[[tfield]][dcl$edges]]
+    } else {
+        dcl[, tier := 2]
+    }
+    if (tier2.only) {
+        dcl[, t2.count := sum(tier == 2), by = 'listid']
+        dcl = dcl[t2.count > 0,]
+    }
     return(dcl)
 }
 
