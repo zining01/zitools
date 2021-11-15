@@ -4,14 +4,37 @@
 \alias{ecycles}
 \title{ecycles}
 \usage{
-ecycles(junctions = NULL, jabba_rds = NULL, thresh = 1000, verbose = FALSE)
+ecycles(
+  junctions = NULL,
+  tfield = "tier",
+  jabba_rds = NULL,
+  small.inv = FALSE,
+  thresh = 10000,
+  min.span = 10000,
+  chunksize = 1e+30,
+  tier2.only = TRUE,
+  mc.cores = 1,
+  verbose = FALSE
+)
 }
 \arguments{
-\item{junctions}{(character) path to junctions file or GRangesList}
+\item{junctions}{(character) path to junctions file or GRangesList with field tier}
+
+\item{tfield}{(character)}
 
 \item{jabba_rds}{(character) path to JaBbA output}
 
+\item{small.inv}{(logical) allow small inversions? default FALSE}
+
 \item{thresh}{(numeric) distance threshold for reciprocality, default 1e3 (bp)}
+
+\item{min.span}{(numeric) thres for removing small dups and dels (1e3 bp)}
+
+\item{chunksize}{(numeric) default 1e30}
+
+\item{tier2.only}{(logical) only keep cycles with at least 1 tier 2 junction}
+
+\item{mc.cores}{(numeric) default 1}
 
 \item{verbose}{(logical) default FALSE}
 }

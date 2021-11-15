@@ -6,6 +6,7 @@
 \usage{
 cn_analysis(
   seg = NULL,
+  gr = NULL,
   gs = NULL,
   method = "jabba",
   id = "sample",
@@ -17,6 +18,8 @@ cn_analysis(
 }
 \arguments{
 \item{seg}{(character) path to seg file}
+
+\item{gr}{(GRanges) allow GRanges input directly}
 
 \item{gs}{(character) path to gold standard segs}
 
