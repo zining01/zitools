@@ -8,6 +8,221 @@
 #' @importFrom rtracklayer import import.bw
 #' @importFrom skitools rel2abs ppng
 
+#' @name mask_gg_cn
+#' @title mask_gg_cn
+#'
+#' @description
+#' returns only the segments with less than mask_thresh overlapping the mask
+#' 
+#' @param jabba_rds (character) path to jabba rds
+#' @param mask (character) path to mask
+#' @param mask_thresh (numeric) between zero and one, fraction of width masked
+#' @param base_thresh (numeric) min number of CN-supporting bases
+#' @param return.type (character)
+#' @param verbose
+mask_gg_cn = function(jabba_rds,
+                      mask = "~/projects/gGnome/files/lowmap.rds",
+                      frac_thresh = 0.5,
+                      base_thresh = 1e6,
+                      return.type = "GRanges",
+                      verbose = FALSE) {
+
+    if (!check_file(jabba_rds)) {
+        stop("jabba_rds not valid")
+    }
+    if (!check_file(mask)) {
+        stop("mask not valid")
+    }
+
+    gg = gG(jabba = jabba_rds)
+    mask.gr = readRDS(mask)
+
+    if (!check_class(mask.gr, "GRanges")) {
+        stop("mask must be GRanges")
+    }
+    
+    nodes = gr.stripstrand(gg$nodes$gr)
+    nodes$ov.frac = nodes %O% mask.gr
+    nodes$good.bases  = (width(nodes) - nodes %o% mask.gr)
+    nodes = nodes %Q% (ov.frac < frac_thresh | good.bases > base_thresh)
+    if (return.type == "data.table") {
+        return(as.data.table(nodes))
+    }
+    return(nodes)
+}
+
+#' @name mnorm_cov
+#' @title mnorm_cov
+#'
+#' @description
+#'
+#' mean normalize reads and coerce to template for dryclean
+#' 
+#' @param cov_rds (character) path to coverage file
+#' @param template.gr (GRanges) template as GRanges
+#' @param template (character) path to template
+#' @param field (character) default counts
+#' @param chrsub (logical) get rid of chr prefix
+#' @param verbose (logical)
+#' 
+#' @return GRanges of cov_rds with counts coerced to template and mean normalized in $reads.corrected
+mnorm_cov = function(cov_rds = "/dev/null",
+                     cov.gr = GRanges(),
+                     template.gr = GRanges(),
+                     template = "~/projects/dryclean/MPON_raw_inputs/WCM-4_1kb.rds",
+                     field = "auto",
+                     clean = TRUE, ## NA out GC NAs and MAP0
+                     chrsub = TRUE,
+                     verbose = FALSE) {
+
+    ## if (!check_file(template)) {
+    ##     stop("Invalid template")
+    ## }
+
+    ## if (!check_file(cov_rds)) {
+    ##     stop("Invalid coverage file")
+    ## }
+
+    if (check_file(cov_rds)) {
+        if (verbose) {
+            message("Reading coverage from: ", cov_rds)
+        }
+        cov.gr = readRDS(cov_rds)
+    }
+
+    if (!inherits(cov.gr, "GRanges")) {
+        stop("cov must be GRanges")
+    }
+
+    if (!length(cov.gr)) {
+        stop("cov is empty!")
+    }
+
+    if (field == "auto") {
+        mnames = names(values(cov.gr))
+        field = mnames[mnames %like% "count"][1]
+        if (verbose) {
+            message("Using field: ", field)
+        }
+    }
+
+    if (inherits(template.gr, "GRanges") && length(template.gr)) {
+        message("Using supplied template")
+    } else {
+        if (check_file(template)) {
+            if (verbose) {
+                message("Reading template from: ", template)
+            }
+            template.gr = readRDS(template)[, c()] ## remove metadata
+        } else {
+            stop("No template!!")
+        }
+    }
+
+    if (!inherits(template.gr, "GRanges")) {
+        stop("template must be GRanges!")
+    }
+
+    if (!length(template.gr)) {
+        stop("No GRanges supplied in template!")
+    }
+
+    if (chrsub) {
+        if (verbose) {
+            message("Replacing chr prefix")
+        }
+        cov.gr = gr.nochr(cov.gr)
+    }
+
+    if (clean) {
+        gc.map = which(is.na(cov.gr$gc) | is.na(cov.gr$map) | cov.gr$map == 0)
+        values(cov.gr)[gc.map, field] = NA
+    }
+
+    if (verbose) {
+        message("Starting analysis")
+    }
+
+    ov.dt = gr.findoverlaps(template.gr, cov.gr, return.type = "data.table")
+    ov.dt[, count := values(cov.gr)[[field]][subject.id]]
+    template.dt = ov.dt[, .(count = sum(count, na.rm = TRUE)), by = query.id]
+    template.gr$reads = template.dt$count[match(1:length(template.gr), template.dt$query.id)]
+    mean.reads = mean(template.gr$reads, na.rm = TRUE)
+    template.gr$reads.corrected = template.gr$reads / mean.reads
+
+    return(template.gr)
+}
+
+#' @name grab_cnloh
+#' @title grab_cnloh
+#'
+#' @param gr (GRanges)
+#' @param a.field (character) field of A allele CN
+#' @param b.field (character) field of B allele CN
+#' @param return.type (character) data.table or GRanges
+#'
+#' @return LOH starting points plus metadata column "balanced" indicated whether it is copy-neutral
+grab_cnloh = function(gr, a.field = "A", b.field = "B", return.type = "GRanges") {
+
+    if (!inherits(gr, 'GRanges')) {
+        stop("gr must be GRanges")
+    }
+
+    if (!(a.field %in% names(values(gr))) | !(b.field %in% names(values(gr)))) {
+        stop("a.field and b.field must be metadata columns of gr")
+    }
+
+    gr = copy(gr)
+
+    ## sort GRanges
+    seqlevels(gr) = sort(seqlevels(gr))
+    gr = sort(gr)
+    
+    gr$A = values(gr)[[a.field]]
+    gr$B = values(gr)[[b.field]]
+    gr$total = gr$A + gr$B
+    gr.dt = as.data.table(gr)
+
+    ## get the previous seqname and previous CN
+    gr.dt[, previous.seqnames := data.table::shift(seqnames, type = "lag")]
+    gr.dt[, previous.A := data.table::shift(A, type = "lag")]
+    gr.dt[, previous.B := data.table::shift(B, type = "lag")]
+    gr.dt[, previous.total := data.table::shift(total, type = "lag")]
+
+    ## check for LOH
+    gr.dt[, start.loh := (seqnames == previous.seqnames) &
+                (((previous.A > 0) & (A == 0)) | ((previous.B > 0) & (B == 0)))]
+    gr.dt[, end.loh := (seqnames == previous.seqnames) &
+                (((previous.A == 0) & (A > 0)) | ((previous.B == 0) & (B > 0)))]
+    gr.dt[, cnloh := (start.loh | end.loh) & (total == previous.total)]
+
+    loh.dt = rbind(gr.dt[(start.loh), .(seqnames, start, end = start,
+                                        strand = "-", balanced = cnloh)],
+                   gr.dt[(end.loh), .(seqnames, start, end = start,
+                                      strand = "+", balanced = cnloh)])
+
+    if (return.type == "data.table") {
+        return(loh.dt)
+    }
+    return(dt2gr(loh.dt))
+}
+
+#' @name standard_grl
+#' @title standard_grl
+#'
+#' @param grl
+#'
+#' @return grl but filtered to only include standard chromosomes
+standard_grl = function(grl = GRangesList()) {
+
+    if (!length(grl)) {
+        return(grl)
+    }
+
+    keep = sapply(seqnames(grl), function(x) {all(grepl('^(chr)*[0-9XY]+$', as.character(x)))})
+    return(grl[keep])
+}
+
 #' @name gg2jab
 #' @title gg2jab
 #'
@@ -63,101 +278,26 @@ gg2jab = function(gg, purity = NA, ploidy = NA) {
     return(res)
 }
 
-#' @name ecycles
-#' @title ecycles
+#' @name egraph
+#' @title egraph
 #'
 #' @description
+#' make edge graph
 #'
-#' Return a data table of all ALT edges in a gGraph that is part of a simple cycle
-#'
-#' @param junctions (character) path to junctions file or GRangesList with field tier
-#' @param tfield (character)
-#' @param jabba_rds (character) path to JaBbA output
-#' @param small.inv (logical) allow small inversions? default FALSE
-#' @param thresh (numeric) distance threshold for reciprocality, default 1e3 (bp)
-#' @param min.span (numeric) thres for removing small dups and dels (1e3 bp)
-#' @param chunksize (numeric) default 1e30
-#' @param tier2.only (logical) only keep cycles with at least 1 tier 2 junction
-#' @param mc.cores (numeric) default 1
+#' @param gg (gGraph)
+#' @param altedges
+#' @param thresh (numeric) distance threshold
 #' @param verbose (logical) default FALSE
+#' @param mc.cores (numeric) default 1
 #'
-#' @return data.table with columns cycle.id, edge.id, class, junction
-#' @export
-ecycles = function(junctions = NULL,
-                   tfield = 'tier',
-                   jabba_rds = NULL,
-                   small.inv = FALSE, ## FALSE as we are not interested in fbi here?
-                   thresh = 1e4,
-                   min.span = 1e4,
-                   chunksize = 1e30,
-                   tier2.only = TRUE,
-                   mc.cores = 1,
-                   verbose = FALSE) {
+#' @return adj (adjacency matrix of edge graph)
+egraph = function(gg, altedges, thresh = 1e4, verbose = FALSE, chunksize = 1e30, mc.cores = 1) {
 
-    ## empty output
-    res = data.table(cycle.id = numeric(),
-                     edge.id = numeric(),
-                     class = character(),
-                     junction = character())
-
-    ## check if gGraph should be created from junctions
-    if (check_file(junctions)) {
-        if (verbose) {
-            message("reading junctions supplied in: ", junctions)
-        }
-        if (grepl(".rds$", junctions)) {
-            jj = readRDS(junctions)
-            if (inherits(jj, 'GRangesList')) {
-                jj = jJ(jj)
-            }
-        } else {
-            jj = jJ(rafile = junctions)
-        }
-        if (verbose) {
-            message("Creating gGraph from junctions")
-        }
-        gg = gG(junctions = jj)
-    } else if (check_file(jabba_rds)) {
-        if (verbose) {
-            message("Reading gGraph from: ", jabba_rds)
-        }
-        gg = gG(jabba = jabba_rds)
-    } else {
-        stop("Must supply junctions or jabba_rds")
-    }
-
-
-    ## remove small dups and dels
-    espans = gg$junctions[type == "ALT"]$span
-    eclass = gg$junctions[type == "ALT"]$dt$class
-    if (small.inv) {
-        if (verbose) {
-            message("Allowing small inversions but removing small dups and dels under ",
-                    min.span, " bp")
-        }
-        ggjuncs = gg$junctions[type == "ALT"][espans > min.span |
-                                              eclass == "INV-like" |
-                                              eclass == "TRA-like"]
-    } else {
-        if (verbose) {
-            message("Not allowing small inversions, dups, or dels under ", min.span, " bp")
-        }
-        ggjuncs = gg$junctions[type == "ALT"][espans > min.span | eclass == "TRA-like"]
-    }
     if (verbose){
-        message("Number of junctions after removing low-span junctions: ", length(ggjuncs))
+        message(sprintf('Computing junction graph across %s ALT edges with distance threshold %s',
+                        length(altedges), thresh))
     }
-    gg = gG(junctions = ggjuncs)
-    ## code copied from eclusters
-    altedges = gg$edges[type == "ALT"]
 
-    if (!length(altedges)) {
-        if (verbose) {
-            message("No ALT edges!")
-        }
-        return(res)
-    }
-    
     bp = grl.unlist(altedges$grl)[, c("grl.ix", "grl.iix")]
     bp.dt = gr2dt(bp)
 
@@ -167,11 +307,7 @@ ecycles = function(junctions = NULL,
     ij = do.call(rbind, split(1:length(bp), bp$grl.ix))
     xt.adj = old.adj = Matrix::sparseMatrix(1, 1, x = 0, dims = rep(length(bp), 2))
 
-    if (verbose){
-        message(sprintf('Computing junction graph across %s ALT edges with distance threshold %s', length(altedges), thresh))
-    }
-
-    if (!exists(".INF")){
+    if (!exists(".INF")) {
         .INF = pmax(sum(seqlengths(gg)), 1e9)
     }
     xt.adj[ixu, ] = do.call(rbind,
@@ -201,8 +337,14 @@ ecycles = function(junctions = NULL,
                }))
     xt.adj[bp.pair] = 1
 
+    if (verbose) {
+        message("starting clustering")
+    }
+
     ## do single linkage hierarchical clustering within `range`
-    hcl = stats::hclust(as.dist(xt.adj), method = "single")
+    edist = as.dist(xt.adj)
+    edist[which(is.na(edist))] = 0
+    hcl = stats::hclust(edist, method = "single")
     hcl.lbl = cutree(hcl, h = thresh)
     bp.dt$hcl = hcl.lbl
     bp.hcl =
@@ -282,6 +424,136 @@ ecycles = function(junctions = NULL,
     adj2[junneg, junpos] = adj[bp1, bp1]
     adj2[junneg, junneg] = adj[bp1, bp2]
 
+    return(adj2)
+} 
+
+
+
+#' @name ecycles
+#' @title ecycles
+#'
+#' @description
+#'
+#' Return a data table of all ALT edges in a gGraph that is part of a simple cycle
+#'
+#' @param junctions (character) path to junctions file or GRangesList with field tier
+#' @param jj (Junctions) if supplied, overrides junctions path
+#' @param grl (GRangesList) if supplied, overrides junctions
+#' @param tfield (character)
+#' @param jabba_rds (character) path to JaBbA output
+#' @param small.inv (logical) allow small inversions? default TRUE
+#' @param thresh (numeric) distance threshold for reciprocality, default 1e3 (bp)
+#' @param min.span (numeric) thres for removing small dups and dels (1e3 bp)
+#' @param min.length (numeric) min number of unique edges in a cycle/path (default 2)
+#' @param chunksize (numeric) default 1e30
+#' @param tier2.only (logical) only keep cycles with at least 1 tier 2 junction (applies to short reads)
+#' @param path (logical) simple paths instead of cycles? default FALSE
+#' @param standard.only (logical) default TRUE
+#' @param mc.cores (numeric) default 1
+#' @param verbose (logical) default FALSE
+#'
+#' @return data.table with columns cycle.id, edge.id, class, junction
+#' @export
+ecycles = function(junctions = NULL,
+                   jj = NULL,
+                   grl = NULL,
+                   tfield = 'tier',
+                   jabba_rds = NULL,
+                   small.inv = TRUE, 
+                   thresh = 1e4,
+                   min.span = 1e4,
+                   min.length = 2, ## min number of junctions in path or cycle
+                   chunksize = 1e30,
+                   tier2.only = TRUE,
+                   path = FALSE,
+                   standard.only = TRUE,
+                   mc.cores = 1,
+                   verbose = FALSE) {
+
+    ## empty output
+    res = data.table(cycle.id = numeric(),
+                     edge.id = numeric(),
+                     class = character(),
+                     junction = character())
+
+    ## check if gGraph should be created from junctions
+    if (check_class(jj, 'Junction')) {
+        gg = gG(junctions = jj)
+    } else if (check_class(grl, 'GRangesList')) {
+        gg = gG(junctions = jJ(grl))
+    } else {
+        if (check_file(junctions)) {
+            if (verbose) {
+                message("reading junctions supplied in: ", junctions)
+            }
+            if (grepl(".rds$", junctions)) {
+                jj = readRDS(junctions)
+                if (inherits(jj, 'GRangesList')) {
+                    jj = jJ(jj)
+                }
+            } else {
+                jj = jJ(rafile = junctions)
+            }
+            if (verbose) {
+                message("Creating gGraph from junctions")
+            }
+            gg = gG(junctions = jj)
+        } else if (check_file(jabba_rds)) {
+            if (verbose) {
+                message("Reading gGraph from: ", jabba_rds)
+            }
+            gg = gG(jabba = jabba_rds)
+        } else {
+            stop("Must supply junctions or jabba_rds")
+        }
+    }
+
+
+    ## remove small dups and dels
+    espans = gg$junctions[type == "ALT"]$span
+    eclass = gg$junctions[type == "ALT"]$dt$class
+    if (small.inv) {
+        if (verbose) {
+            message("Allowing small inversions but removing small dups and dels under ",
+                    min.span, " bp")
+        }
+        ggjuncs = gg$junctions[type == "ALT"][espans > min.span |
+                                              eclass == "INV-like" |
+                                              eclass == "TRA-like"]
+    } else {
+        if (verbose) {
+            message("Not allowing small inversions, dups, or dels under ", min.span, " bp")
+        }
+        ggjuncs = gg$junctions[type == "ALT"][espans > min.span | eclass == "TRA-like"]
+    }
+    if (verbose){
+        message("Number of junctions after removing low-span junctions: ", length(ggjuncs))
+    }
+
+    if (standard.only) {
+        if (verbose) {
+            message("Using only standard chromosomes")
+        }
+        ggjuncs.grl = standard_grl(ggjuncs$grl)
+        ggjuncs = jJ(ggjuncs.grl)
+    }
+    gg = gG(junctions = ggjuncs)
+    ## code copied from eclusters
+    altedges = gg$edges[type == "ALT"]
+
+    if (!length(altedges)) {
+        if (verbose) {
+            message("No ALT edges!")
+        }
+        return(res)
+    }
+    
+    if (verbose){
+        message('starting egraph')
+    }
+
+    adj2 = egraph(gg, altedges, thresh = thresh, mc.cores = mc.cores, verbose = verbose, chunksize = chunksize)
+
     if (verbose)
         message(sprintf('Created basic junction graph using distance threshold of %s', thresh))
 
@@ -295,24 +567,48 @@ ecycles = function(junctions = NULL,
     all.cy = list()
     ## number of cycles in the graph
     num.cy = 0
+    if (verbose) {
+        message("Number of rows with outgoing edges: ", length(unique.fr))
+    }
     for (rw in unique.fr) {
         fr = dt[row == rw, col]
-        cy = igraph::shortest_paths(gr, from = fr, to = rw)$vpath
-        sel = which(sapply(cy, length) > 1)
+        if (path) {
+            ## get simple paths of length at least 2 FROM that node TO any node in the graph
+            cy = igraph::shortest_paths(gr, from = rw, to = V(gr))$vpath
+            sel = which(sapply(cy, length) >= min.length)
+        } else {
+            ## get simple cycles containing at least one other edge
+            cy = igraph::shortest_paths(gr, from = fr, to = rw)$vpath
+            ## only include loops with more than one node to exclude self loops
+            sel = which(sapply(cy, function(x) {length(unique(x))}) >= min.length)
+        }
         for (ix in sel) {
             num.cy = num.cy + 1
-            all.cy[[num.cy]] = sort(as.numeric(cy[sel][[ix]]))
+            if (path) {
+                ## don't sort but recast node ID's as numeric
+                all.cy[[num.cy]] = as.numeric(cy[[ix]])
+            } else {
+                ## if enumerating cycles it is important to sort to remove cyclic paths
+                all.cy[[num.cy]] = sort(as.numeric(cy[[ix]]))
+            }
         }
     }
 
     if (!length(all.cy)) {
         if (verbose) {
-            message("No cycles found!")
+            message("No cycles/paths found!")
         }
         return(res)
     } 
     unique.cy = unique(all.cy)
-    jcl = lapply(unique.cy, function(x) unique(sort(bp$grl.ix[x]))) %>% unique
+
+    if (verbose) {
+        message("Mapping cycle junctions to original junction ID's")
+    }
+    bp = grl.unlist(altedges$grl)[, c("grl.ix", "grl.iix")]
+    ## don't sort to preserve edge order of paths
+    ## jcl = lapply(unique.cy, function(x) unique(sort(bp$grl.ix[x]))) %>% unique
+    jcl = lapply(unique.cy, function(x) bp$grl.ix[x]) %>% unique
     dcl = dunlist(unname(jcl)) %>% setnames(new = c('listid', 'edges'))
     dcl[, class := altedges$dt[dcl$edges, class]]
     dcl[, junction := grl.string(altedges$grl[dcl$edges])]
@@ -325,12 +621,272 @@ ecycles = function(junctions = NULL,
         dcl[, t2.count := sum(tier == 2), by = 'listid']
         dcl = dcl[t2.count > 0,]
     }
+
+    ## add length of path
+    if (nrow(dcl)) {
+        dcl[, pathlength := .N, by = listid]
+        if (path) {
+            ## add index of edge in path
+            dcl[, pathid := 1:.N, by = listid]
+            ## is this an internal nodei n the path?
+            dcl[, internal := !(pathid == pathlength | pathid == 1)]
+        } else {
+            dcl[, pathid := 1:.N, by = listid]
+            dcl[, internal := TRUE] ## all cycles are technically internal?
+        }
+    } else {
+        dcl[, pathlength := numeric()]
+        dcl[, pathid := numeric()]
+        dcl[, internal := logical()]
+    }
+    
     return(dcl)
 }
 
+#' @name junction_coverage
+#' @title junction_coverage
+#'
+#' @description
+#'
+#' get coverage around the breakpoints of each junction
+#'
+#' @param rafile (character)
+#' @param cov_rds (character)
+#' @param standard.only (logical) default TRUE
+#' @param field (character) default foreground
+#' @param pad (character) default 5e4
+#' @param mask (character) path to coverage mask
+#' @param verbose (logical)
+#'
+#' @return data.table with columns:
+#' - bp.index (junction index)
+#' - bp (either 1 or 2, indicating first or second breakpoint)
+#' - breakpoint (gr.string of breakpoint)
+#' - junction (grl.string of junction)
+#' - fused (indicating if coverage is from fused or unfused side)
+#' - cn (coverage)
+junction_coverage = function(rafile = NULL,
+                             cov_rds = NULL,
+                             standard.only = TRUE,
+                             field = "foreground",
+                             pad = 5e4,
+                             min.span = 1e4,
+                             small.inv = TRUE, ## include small inversions?
+                             mask = "~/projects/gGnome/files/lowmap.rds",
+                             verbose = FALSE) {
+    if (!check_file(rafile)) {
+        stop("Must supply valid junctions file")
+    }
 
-#' @name grab_cov_gtrack
-#' @title grab_cov_gtrack
+    if (!check_file(cov_rds)) {
+        stop("must supply valid coverage")
+    }
+
+    ## read junctions
+    if (verbose) {
+        message("Reading junctions from RAfile: ", rafile)
+    }
+    
+    if (grepl(".rds$", rafile)) {
+        jj = readRDS(rafile)
+        if (inherits(jj, 'GRangesList')) {
+            jj = jJ(jj)
+        }
+    } else {
+        jj = jJ(rafile = rafile)
+    }
+
+    ## get just standard chroms
+    grl = jj$grl
+    if (standard.only) {
+        grl = standard_grl(grl)
+        jj = jJ(grl)
+    }
+    gg = gG(junctions = jj)
+
+    ## get things with correct span
+    jj = gg$junctions[gg$junctions$span > min.span | gg$junctions$dt$class == "INV-like"]
+    gg = gG(junctions = jj)
+    grl = gg$edges[type == "ALT"]$grl
+
+    if (length(jj)) {
+
+        if (verbose) {
+            message("Number of junctions to check: ", length(grl))
+        }
+        
+        piv = grl.pivot(gg$edges[type == "ALT"]$grl)
+        altedges = gg$edges[type == "ALT"]
+        ## get coverage for breakpoint 1
+        ov1 = breakpoint_coverage(piv[[1]], cov_rds, field = field, pad = pad, mask = mask, verbose = verbose)
+        ov1[, ":="(bp = 1, breakpoint = gr.string(piv[[1]])[bp.index], junction = grl.string(altedges$grl)[bp.index])]
+        
+        ## get coverage for breakpoint 2
+        ov2 = breakpoint_coverage(piv[[2]], cov_rds, field = field, pad = pad, mask = mask, verbose = verbose)
+        ov2[, ":="(bp = 2, breakpoint = gr.string(piv[[2]])[bp.index], junction = grl.string(altedges$grl)[bp.index])]
+
+        return(rbind(ov1, ov2))
+    }
+
+    if (verbose) {
+        message("No junctions!")
+    }
+    return(data.table())
+}
+
+#' @name breakpoint_coverage
+#' @title breakpoint_coverage
+#'
+#' @description
+#'
+#' Get coverage bins within a certain distance of fused and unfused sides of breakpoints
+#'
+#' @param bps (GRanges) breakpoints
+#' @param cov_rds (character) coverage file
+#' @param field (character) default foreground
+#' @param pad (numeric) default 5e4
+#' @param mask (character) path to coverage mask
+#' @param verbose (logical) default FALSE
+#'
+#' @return data.table with fields:
+#' - cn (from coverage)
+#' - bp.index (index from breakpoints)
+breakpoint_coverage = function(bps = GRanges(),
+                               cov_rds = NULL,
+                               field = "foreground",
+                               pad = 5e4,
+                               mask = "~/projects/gGnome/files/lowmap.rds",
+                               verbose = FALSE) {
+
+    ## read coverage file
+    if (!check_file(cov_rds)) {
+        stop("Invalid coverage file")
+    }
+    cov = readRDS(cov_rds)
+
+    if (!field %in% names(values(cov))) {
+        stop("coverage metadata missing field: ", field)
+    }
+
+    ## read mask and check masked bins
+    if (check_file(mask)) {
+        mask.gr = readRDS(mask)
+    } else {
+        mask.gr = GRanges(seqlengths = seqlengths(cov))
+    }
+
+    ## remove bins with no coverage or masked
+    cov = cov %Q% (!(cov %^% mask.gr))
+    cov = cov %Q% (!is.na(values(cov)[[field]]))
+
+    ## get fused and unfused sides of each breakpoint
+    fused = resize(bps, width = pad, fix = 'start')
+    unfused = resize(bps, width = pad, fix = 'end')
+    fused$fused = 'fused'
+    fused$bp.index = 1:length(fused)
+    unfused$fused = 'unfused'
+    unfused$bp.index = 1:length(unfused)
+    bp.sides = c(fused, unfused)
+    ov = gr.findoverlaps(bp.sides, cov, return.type = 'data.table')
+    if (nrow(ov)) {
+        ov[, fused := bp.sides$fused[query.id]]
+        ov[, bp.index := bp.sides$bp.index[query.id]]
+        ov[, cn := values(cov)[[field]][subject.id]]
+        ov = ov[!is.na(cn) & cn > 0,]
+    } else {
+        res = ov
+    }
+    return(ov)
+}
+
+#' @name grab.hets.gtrack
+#' @title grab.hets.gtrack
+#'
+#' @description
+#'
+#' create gTrack for hets
+#'
+#' @param hets (character) variants text file
+#' @param jab (character)
+#' @param ... additional params for gTrack
+grab.hets.gtrack = function(hets = NULL,
+                            jab = NULL,
+                            purity = NULL,
+                            ploidy = NULL,
+                            ...) {
+
+    if (!check_file(hets)) {
+        stop("Invalid hets file")
+    }
+
+    args = list(...)
+    
+    hets.gr = grab.hets(agt.fname = hets)
+    hets.gr$col = ifelse(hets.gr$allele == "major", "red", "blue")
+
+    hets.gr$cn = hets.gr$count
+    if (!is.null(purity) & !is.null(ploidy)) {
+
+        ## use supplied purity and ploidy
+        hets.gr$cn = skitools::rel2abs(hets.gr, field = "count", purity = purity, ploidy = ploidy, allele = TRUE)
+
+    } else if (check_file(jab)) {
+        jab.list = readRDS(jab)
+        if (is.null(purity) | is.null(ploidy)) {
+            stop("invalid jabba output missing purity/ploidy")
+        }
+        hets.gr$cn = skitools::rel2abs(hets.gr, field = "count", purity = jab.list$purity, ploidy = jab.list$ploidy, allele = TRUE)
+    } 
+
+    hets.gt = gTrack(hets.gr, y.field = "cn", circles = TRUE, lwd.border = 0.2, max.ranges = 1e4, ...)
+    hets.gt$legend.params = list(plot = FALSE)
+    return(hets.gt)
+}
+
+#' @name grab.hets
+#' @title grab.hets
+#'
+#' @description
+#'
+#' returns allele gtrack given sites.txt from het pileup
+#'
+#' @param agt.fname (character) path to sites.txt
+#' @param min.frac (numeric) between 0 and 1, min frequency in normal to count as het site
+#' 
+#' @return allele gTrack
+grab.hets = function(agt.fname = NULL,
+                     min.frac = 0.2)
+{
+    if (is.null(agt.fname) || !file.exists(agt.fname)) {
+        stop("agt.fname does not exist")
+    }
+
+    ## prepare and filter
+    agt.dt = fread(agt.fname)[alt.frac.n > min.frac & ref.frac.n > min.frac,]
+    agt.dt[, ":="(alt.count.t = as.numeric(alt.count.t),
+                  ref.count.t = as.numeric(ref.count.t),
+                  alt.count.n = as.numeric(alt.count.n),
+                  ref.count.n = as.numeric(ref.count.n))]
+    
+    ## add major and minor
+    agt.dt[, which.major := ifelse(alt.count.t > ref.count.t, "alt", "ref")]
+    agt.dt[, major.count := ifelse(which.major == "alt", alt.count.t, ref.count.t)]
+    agt.dt[, minor.count := ifelse(which.major == "alt", ref.count.t, alt.count.t)]
+
+    ## melt the data frame
+    agt.melted = rbind(agt.dt[, .(seqnames, start, end, count = major.count, allele = "major")],
+                       agt.dt[, .(seqnames, start, end, count = minor.count, allele = "minor")]
+                       )
+
+    ## make GRanges
+    agt.gr = dt2gr(agt.melted[, .(seqnames, start, end, count, allele)])
+    agt.gr$count = as.numeric(agt.gr$count)
+
+    return (agt.gr)
+}
+
+#' @name grab.cov.gtrack
+#' @title grab.cov.gtrack
 #'
 #' @description
 #'
@@ -343,6 +899,7 @@ ecycles = function(junctions = NULL,
 #' @param lwd.border (numeric)
 #' @param max.ranges (numeric)
 #' @param name (character)
+#' @param mask (character) path to coverage mask
 #' @param field (character) field in coverage file
 #' @param ... additional params for gTrack
 #'
@@ -355,6 +912,8 @@ grab.cov.gtrack = function(cov, jab = NULL,
                            lwd.border = 0.2,
                            max.ranges = 1e4,
                            name = "cov",
+                           mask = "/dev/null",
+                           chrsub = TRUE,
                            ...) {
     if (grepl("txt", cov)) {
         cov.gr = dt2gr(fread(cov))
@@ -362,6 +921,10 @@ grab.cov.gtrack = function(cov, jab = NULL,
         cov.gr = readRDS(cov)
     } else {
         stop("invalid file name")
+    }
+
+    if (chrsub) {
+        cov.gr = gr.nochr(cov.gr)
     }
 
     if (!field %in% names(values(cov.gr))) {
@@ -377,6 +940,13 @@ grab.cov.gtrack = function(cov, jab = NULL,
         cov.gr$cn = skitools::rel2abs(cov.gr, field = field, purity = purity, ploidy = ploidy, allele = FALSE)
     } else {
         cov.gr$cn = values(cov.gr)[[field]]
+    }
+
+    ## NA anything that's masked
+    if (check_file(mask)) {
+        mask.gr = readRDS(mask)
+        ## set colors if masked
+        values(cov.gr)[, "col"] = ifelse(cov.gr %^% mask.gr, "red", "black")
     }
 
     cov.gt = gTrack(cov.gr, y.field = "cn",
@@ -573,10 +1143,13 @@ fused_unfused = function(loose.dt,
 #'
 #' @param jabba_rds (character) path to jabba output
 #' @param return.type (character) one of GRanges, data.table
+#' @param std.chrs (logical) return only loose ends on standard chromosomes
 #' 
 #' @return loose ends of a JaBbA graph as GRanges
 #' if gGraph is not balanced, will produce a warning and return empty GRanges
-gg_loose_end = function(jabba_rds = NA_character_, return.type = "GRanges") {
+gg_loose_end = function(jabba_rds = NA_character_,
+                        return.type = "GRanges",
+                        std.chrs = TRUE) {
     
     if (!check_file(jabba_rds)) {
         stop("file does not exist: ", jabba_rds)
@@ -601,6 +1174,12 @@ gg_loose_end = function(jabba_rds = NA_character_, return.type = "GRanges") {
     }
 
     all.loose.dt = rbind(ll, lr, fill = TRUE)
+
+    if (all.loose.dt[, .N]) {
+        stdchrs = c(as.character(1:22), "X", "Y")
+        all.loose.dt = all.loose.dt[(as.character(seqnames) %in% stdchrs) |
+                                    (as.character(seqnames) %in% paste0("chr", stdchrs)),]
+    }
 
 
     if (return.type == "GRanges") {
@@ -627,11 +1206,12 @@ gg_loose_end = function(jabba_rds = NA_character_, return.type = "GRanges") {
 #' @param verbose (logical)
 grab_loose = function(jabba_rds,
                       coverage = "/dev/null",
-                      tumor_coverage = coverage,
+                      tumor_coverage = "/dev/null",
                       norm.field = 'norm.counts',
                       tumor.field = 'foreground',
-                      cov.pad = 1e5,
+                      cov.pad = 5e4,
                       mask = "~/projects/gGnome/files/new.mask.rds",
+                      bp.mask = "~/projects/gGnome/files/bpmask.tile100.rds",
                       mask_pad = 1e4,
                       bad_thresh = NA,##0.4,
                       norm_thresh = 0.6,
@@ -644,7 +1224,6 @@ grab_loose = function(jabba_rds,
         stop("JaBbA file path not valid")
     }
 
-    jabba_rds = file.path(dirname(jabba_rds), "jabba.raw.rds")
     jabba_simple_rds = file.path(dirname(jabba_rds), "jabba.simple.rds")
 
     if (!check_file(coverage)) {
@@ -657,6 +1236,7 @@ grab_loose = function(jabba_rds,
             message("Reading normal coverage")
         }
         cov.gr = readRDS(coverage)
+        cov.gr = gr.sub(cov.gr)
         use.coverage = TRUE
     }
 
@@ -704,10 +1284,37 @@ grab_loose = function(jabba_rds,
     le.gr$loose.index = 1:length(le.gr)
 
     ## check if loose end overlaps mask
-    if (file.exists(mask)) {
+    if (check_file(mask)) {
+
+        if (verbose) {
+            message("Checking overlaps with mask")
+        }
         mask.gr = readRDS(mask)
         overlap.mask = le.gr %^% (gr.stripstrand(mask.gr) + mask_pad)
         le.dt[, mask := overlap.mask]
+
+        ## also remove masked coverage bins!
+        if (use.coverage) {
+            cov.gr = cov.gr %Q% (!(cov.gr %^% gr.stripstrand(mask.gr)))
+        }
+        if (use.tumor.coverage) {
+            tum.cov.gr = tum.cov.gr %Q% (!(tum.cov.gr %^% gr.stripstrand(mask.gr)))
+        }
+        
+    } else {
+        le.dt[, mask := FALSE]
+    }
+
+    if (check_file(bp.mask)) {
+
+        if (verbose) {
+            message("Checking overlaps with coverage mask")
+        }
+        
+        bp.mask.gr = readRDS(bp.mask)
+        le.dt[, bp.mask := le.gr %^% gr.stripstrand(bp.mask.gr)]
+    } else {
+        le.dt[, bp.mask := FALSE]
     }
 
     ## get node ids of fused and unfused loose ends
@@ -716,11 +1323,11 @@ grab_loose = function(jabba_rds,
     }
     
     fused.unfused.dt = fused_unfused(le.dt, jabba_rds)
-    simple.fused.unfused.dt = fused_unfused(le.dt, jabba_simple_rds)
+    simple.fused.unfused.dt = fused_unfused(le.dt, jabba_rds)
 
     ## grab gGraph
     gg = gG(jabba = jabba_rds)
-    gg.simple = gG(jabba = jabba_simple_rds)
+    gg.simple = gG(jabba = jabba_rds)
 
     ## get flanking normal coverage (borrowed from filter.loose)
     fused.melted.dt = melt.data.table(fused.unfused.dt, id.vars = "loose.index",
@@ -740,11 +1347,13 @@ grab_loose = function(jabba_rds,
 
     if (use.coverage) {
 
-        ## overlap with normal coverage
+        ## use breakpoint coverage function?
         sides.cov.dt = gr.findoverlaps(cov.gr, sides.gr, return.type = 'data.table')
-        sides.cov.dt[, normal.cov := values(cov.gr)[[norm.field]][query.id]]
-        sides.cov.dt[, fused := values(sides.gr)$fused[subject.id]]
-        sides.cov.dt[, loose.index := values(sides.gr)$loose.index[subject.id]]
+        if (nrow(sides.cov.dt)) {
+            sides.cov.dt[, normal.cov := values(cov.gr)[[norm.field]][query.id]]
+            sides.cov.dt[, fused := values(sides.gr)$fused[subject.id]]
+            sides.cov.dt[, loose.index := values(sides.gr)$loose.index[subject.id]]
+        }
 
     }
 
@@ -752,60 +1361,92 @@ grab_loose = function(jabba_rds,
 
         ## get tumor coverage to compute autocorrelation
         tumor.cov.dt = gr.findoverlaps(tum.cov.gr, sides.gr, return.type = 'data.table')
-        tumor.cov.dt[, tumor.cov := values(tum.cov.gr)[[tumor.field]][query.id]]
-        tumor.cov.dt[, fused := values(sides.gr)$fused[subject.id]]
-        tumor.cov.dt[, loose.index := values(sides.gr)$loose.index[subject.id]]
-
-        ## compute waviness at loose ends
-        if(verbose) {
-            message("Calculating waviness around loose end")
+        if (nrow(tumor.cov.dt)) {
+            tumor.cov.dt[, tumor.cov := values(tum.cov.gr)[[tumor.field]][query.id]]
+            tumor.cov.dt[, fused := values(sides.gr)$fused[subject.id]]
+            tumor.cov.dt[, loose.index := values(sides.gr)$loose.index[subject.id]]
         }
-        ## autocorrelation.dt = tumor.cov.dt[, .(waviness = max(.waviness(start[fused], tumor.cov[fused]),
-        ##                                                      .waviness(start[!fused], tumor.cov[!fused]),
-        ##                                                      na.rm=T)), by=loose.index]
-
-        tumor.cov.dt[, count := .N, by = .(loose.index, fused)]
-        autocorrelation.dt = tumor.cov.dt[count > 1,
-                                          .(autocorr = max(as.numeric(acf(tumor.cov)$acf)[-1],
-                                                           na.rm = TRUE)),
-                                          by = .(fused, loose.index)][, .(autcorr = max(autocorr, na.rm = T)),
-                                                                      by = loose.index]
-
-        ## add autocorrelation info
-        le.dt[, autocorrelation := autocorrelation.dt$autcorr[match(loose.index, autocorrelation.dt$loose.index)]]
-        le.dt[, highcorr := autocorrelation >= corr_thresh]
 
     } else {
 
         if (verbose) {
-            message("Skipping autocorrelation calculation as no coverage supplied")
+            message("Not using tumor coverage")
         }
-        le.dt[, autocorrelation := NA]
-        le.dt[, highcorr := FALSE]
     }
 
     if (use.coverage) {
         ## compute mean coverage for fused and unfused sides
-        mean.cov.dt = sides.cov.dt[, .(mean.normal.cov = mean(normal.cov, na.rm = T)),
-                                   by = .(loose.index, fused)]
-        mean.cov.dt[, fused := ifelse(fused, 'fused', 'unfused')]
-        mean.cov.dt = dcast.data.table(mean.cov.dt, loose.index ~ fused, value.var = "mean.normal.cov")
 
-        ## determine whether it's higher than normal beta but only consider only diploid chr
-        autosomal.chrs = grep("(^(chr)*[0-9]+$)", names(seqlengths(cov.gr)), value = TRUE)
-        norm.beta = mean(as.data.table(cov.gr)[seqnames %in% autosomal.chrs,][[norm.field]], na.rm = TRUE) * 0.5 ## factor of 0.5 is for allelic CN
-        mean.cov.dt[, norm.change := norm_thresh * norm.beta < abs(fused - unfused)]
+        if (sides.cov.dt[, .N]) {
+            mean.cov.dt = sides.cov.dt[, .(mean.normal.cov = mean(normal.cov, na.rm = T)),
+                                       by = .(loose.index, fused)]
+            mean.cov.dt[, fused := ifelse(fused, 'fused', 'unfused')]
+            mean.cov.dt[, fused := factor(fused, levels = c("fused", "unfused"))]
+            mean.cov.dt = dcast.data.table(mean.cov.dt, loose.index ~ fused, value.var = "mean.normal.cov")
+            
 
-        ## mark normal change and copy normal fused and unfused coverage
-        le.dt$norm.change = le.dt$loose.index %in% mean.cov.dt[(norm.change), loose.index]
-        le.dt$norm.fused = mean.cov.dt$fused[match(le.dt$loose.index, mean.cov.dt$loose.index)]
-        le.dt$norm.unfused = mean.cov.dt$unfused[match(le.dt$loose.index, mean.cov.dt$loose.index)]
+            ## determine whether it's higher than normal beta but only consider only diploid chr
+            autosomal.chrs = grep("(^(chr)*[0-9]+$)", names(seqlengths(cov.gr)), value = TRUE)
+            norm.beta = mean(as.data.table(cov.gr)[seqnames %in% autosomal.chrs,][[norm.field]], na.rm = TRUE) * 0.5
+
+            if ("fused" %in% colnames(mean.cov.dt) & "unfused" %in% colnames(mean.cov.dt)) {
+                mean.cov.dt[, norm.change := norm_thresh * norm.beta < abs(fused - unfused)]
+            } else {
+                mean.cov.dt[, norm.change := NA]
+            }
+
+            ## mark normal change and copy normal fused and unfused coverage
+            le.dt$norm.change = le.dt$loose.index %in% mean.cov.dt[(norm.change), loose.index]
+
+            ## if there is no normal coverage, we cannot confidently tell that there is no change in normal CN
+            le.dt$norm.fused = mean.cov.dt$fused[match(le.dt$loose.index, mean.cov.dt$loose.index)]
+            le.dt$norm.unfused = mean.cov.dt$unfused[match(le.dt$loose.index, mean.cov.dt$loose.index)]
+            le.dt[is.na(norm.fused), norm.change := TRUE]
+            le.dt[is.na(norm.unfused), norm.change := TRUE]
+        } else {
+            le.dt$norm.change = TRUE
+            le.dt$norm.fused = NA
+            le.dt$norm.unfused = NA
+        }
     } else {
-        le.dt$norm.change = FALSE
+        le.dt$norm.change = TRUE
         le.dt$norm.fused = NA
         le.dt$norm.unfused = NA
     }
-    
+
+    if (use.tumor.coverage) {
+        ## compute mean coverage for fused and unfused sides
+        ## this information is not used to filter loose ends but is simply helpful to track
+        if (tumor.cov.dt[, .N]) {
+            mean.cov.dt = tumor.cov.dt[, .(mean.tumor.cov = mean(tumor.cov, na.rm = T)),
+                                       by = .(loose.index, fused)]
+            mean.cov.dt[, fused := ifelse(fused, 'fused', 'unfused')]
+            mean.cov.dt[, fused := factor(fused, levels = c("fused", "unfused"))]
+            mean.cov.dt = dcast.data.table(mean.cov.dt, loose.index ~ fused, value.var = "mean.tumor.cov")
+
+            ## check that read depth is higher on fused side than on unfused side
+            if ("fused" %in% colnames(mean.cov.dt) & "unfused" %in% colnames(mean.cov.dt)) {
+                mean.cov.dt[, tumor.change := fused - unfused > 0]
+            } else {
+                mean.cov.dt[, tumor.change := NA]
+            }
+
+            ## mark normal change and copy normal fused and unfused coverage
+            le.dt$tumor.change = le.dt$loose.index %in% mean.cov.dt[(tumor.change), loose.index]
+
+            ## if there is no normal coverage, we cannot confidently tell that there is no change in normal CN
+            le.dt$tumor.fused = mean.cov.dt$fused[match(le.dt$loose.index, mean.cov.dt$loose.index)]
+            le.dt$tumor.unfused = mean.cov.dt$unfused[match(le.dt$loose.index, mean.cov.dt$loose.index)]
+        } else {
+            le.dt$tumor.change = FALSE
+            le.dt$tumor.fused = NA
+            le.dt$tumor.unfused = NA
+        }
+    } else {
+        le.dt$tumor.change = FALSE
+        le.dt$tumor.fused = NA
+        le.dt$tumor.unfused = NA
+    }
     ## get size of loose end
     simple.fused.unfused.dt[, fused.size := gg.simple$nodes$dt$width[fused.node.id]]
     simple.fused.unfused.dt[, unfused.size := gg.simple$nodes$dt$width[unfused.node.id]]
@@ -817,28 +1458,16 @@ grab_loose = function(jabba_rds,
     fused.unfused.dt[, unfused.cn := gg$nodes$dt$cn[unfused.node.id]]
     fused.unfused.dt[, fused.lower := (fused.cn <= unfused.cn)]
 
-    ## check whether this sample overlaps a bad part of the coverage
-    ## fused.unfused.dt[, fused.cn.old := gg$nodes$dt$cn.old[fused.node.id]]
-    ## fused.unfused.dt[, unfused.cn.old := gg$nodes$dt$cn.old[unfused.node.id]]
-
     ## merge these with loose ends
-     le.dt = merge.data.table(le.dt, fused.unfused.dt, by = "loose.index", all.x = TRUE)
+    le.dt = merge.data.table(le.dt, fused.unfused.dt, by = "loose.index", all.x = TRUE)
     le.dt = merge.data.table(le.dt,
                              simple.fused.unfused.dt[, .(loose.index, fused.size, unfused.size, size, small)],
                              by = "loose.index", all.x = TRUE)
 
-    ## ## indicate whether to "keep"
-    ## le.dt[, coverage.bad := FALSE]
-    ## if (!is.na(bad_thresh)) {
-    ##     le.dt[!is.na(fused.cn.old) & fused.size > unfused.size,
-    ##           coverage.bad := fused.cn - fused.cn.old > bad_thresh]
-    ##     le.dt[!is.na(unfused.cn.old) & fused.size < unfused.size,
-    ##           coverage.bad := unfused.cn.old - unfused.cn > bad_thresh]
-    ## } else {
-    ##     le.dt[, coverage.bad := FALSE]
-    ## }
-    
-    le.dt[, keep := (!(mask) & !(norm.change) & !(fused.lower) & !(small) & !(highcorr))]
+    ## keep masked loose ends but remove those with inconsistent coverage
+    ## or if for some reason the fused side is not higher than the unfused side
+    le.dt[, keep := !is.na(norm.fused) & !is.na(norm.unfused) & !norm.change & !bp.mask]
+    ## le.dt[, keep := ((tumor.change) & !(norm.change) & !(fused.lower))]
 
     ## add stringified loose end
     loose.end.str = gr.string(dt2gr(le.dt[, .(seqnames, start, end, strand)]))
@@ -1053,7 +1682,7 @@ grab_jabba_epgaps = function(pairs = NULL, mc.cores = 8, return.table = FALSE) {
 #' - junctions.jj: Junctions object
 #' - junctions.res: data.table with columns pair, precision, recall
 junctions_analysis = function(gg = NULL,
-                              gs = NULL,
+                              gs = "~/projects/JaBbA_pipeline/db/hcc1954.sv.gs.rds",
                               max.dist = 1e3,
                               method = "jabba",
                               id = "sample",
@@ -1148,7 +1777,7 @@ junctions_analysis = function(gg = NULL,
 #' - $cncp.gr: GRanges of CN change points in the segmentation + distance to nearest gold-standard point
 #' - $cncp.res: containing F1 score, precision, and recall of CN change points
 cncp_analysis = function(seg = NULL,
-                         gs = NULL,
+                         gs = "~/projects/JaBbA_pipeline/db/hcc1954.sv.gs.rds",
                          method = "jabba",
                          id = "sample",
                          max.dist = 1e4,
@@ -1277,7 +1906,7 @@ compare_jabba_cn = function(gg1 = NULL, gg2 = NULL,
 #' @return list with entries $cncp.gr $cncp.res
 cn_analysis = function(seg = NULL,
                        gr = NULL,
-                       gs = NULL,
+                       gs = "~/projects/JaBbA_pipeline/db/hcc1954.cn.array.new.rds",
                        method = "jabba",
                        id = "sample",
                        tile.width = 1e4,
@@ -1346,10 +1975,33 @@ cn_analysis = function(seg = NULL,
     return(list(cn.res = cn.cor, cn.seg = cn.comp))
 }
 
+#' @name check_class
+#' @title check_class
+#'
+#' @description
+#'
+#' Test if object is an instance of some class
+#' But also if object is null/NA, which breaks inherits()
+#'
+#' @param obj
+#' @param class (character)
+#'
+#' @return logical, TRUE if obj is an instance of class
+check_class = function(obj = NULL, class = character()) {
 
+    if (is.null(obj)) {
+        return(FALSE)
+    }
+
+    return(inherits(x = obj, what = class))
+}
 
 #' @name check_file
 #' @title check_file
+#'
+#' @description
+#'
+#' Check if file supplied is nonempty
 #'
 #' @param fn
 #'
@@ -1784,6 +2436,79 @@ grab_cncp = function(gr = NULL,
 
     return(cncp.gr)
 }
+
+#' @name grab_bad_segs
+#' @title grab_bad_segs
+#'
+#' @description
+#'
+#' Return GRanges with bad segments (high difference between fields)
+#'
+#' @param jabba_rds (character) path to jabba output
+#' @param gs (character) path to gold standard GRanges
+#' @param kag (character) path to karyograph - compare to cn.old
+#' @param field1 (character) default cn
+#' @param field2 (character) default cn
+#' @param bad.thresh (character) numeric, default 1
+#' @param mask (character) path to mask
+#' @param return.type (character) either GRanges or data.table
+#' @param verbose (logical)
+#' @param GRanges with columns cn, cn.gs, and diff (or data.table)
+grab_bad_segs = function(jabba_rds,
+                         gs = NULL,
+                         kag = NULL,
+                         field1 = "cn",
+                         field2 = "cn",
+                         bad.thresh = 1,
+                         mask = "~/projects/gGnome/files/new.mask.rds",
+                         return.type = "data.table",
+                         verbose = FALSE) {
+
+    if (!check_file(jabba_rds)) {
+        stop("Bad jabba_rds")
+    }
+
+    gg = gG(jabba = jabba_rds)
+    
+    if (check_file(gs)) {
+        gs.gr = readRDS(gs)
+        if (!inherits(gs.gr, 'GRanges')) {
+            stop("must supply GRanges in gs")
+        }
+    } else if (check_file(kag)) {
+        gs.gr = gG(jabba = kag)$nodes$gr[, field2]
+    } else {
+        stop("either kag or gs must be supplied")
+    }
+
+    if (field2 %in% names(values(gs.gr))) {
+        gs.gr$cn.gs = values(gs.gr)[[field2]]
+    } else {
+        stop("not found in gs metadata: ", field2)
+    }
+
+    if (check_file(mask)) {
+        mask.gr = readRDS(mask)
+    } else {
+        warning("Invalid mask supplied: ", mask)
+        mask.gr = GRanges(seqlengths = seqlengths(gg))
+    }
+
+    gs.gr = gr.tile(gs.gr, 1e4) %$% gs.gr[, "cn.gs"]
+    gs.gr = gs.gr %Q% (!(gs.gr %^% mask.gr))
+    ov = gr.findoverlaps(gg$nodes$gr, gs.gr, return.type = "data.table")
+    ov[, cn := gg$nodes$dt[, get(field1)][query.id]]
+    ov[, cn.gs := gs.gr$cn.gs[subject.id]]
+    ov[, diff := abs(cn - cn.gs)]
+
+
+    if (return.type == 'GRanges') {
+        return(dt2gr())
+    }
+
+    return(ov[diff > bad.thresh,])
+}
+                         
 
 #' @name compare_cn
 #' @title compare_cn
