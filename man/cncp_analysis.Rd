@@ -6,12 +6,15 @@
 \usage{
 cncp_analysis(
   seg = NULL,
-  gs = NULL,
+  gs = "~/projects/JaBbA_pipeline/db/hcc1954.sv.gs.rds",
   method = "jabba",
   id = "sample",
   max.dist = 10000,
-  mask = "~/projects/gGnome/files/new.mask.rds",
+  mask = "~/projects/gGnome/files/zc_stash/maskA_re.rds",
+  field = "cn",
   simplify = FALSE,
+  loose.only = FALSE,
+  ignore.strand = FALSE,
   verbose = FALSE
 )
 }
@@ -29,6 +32,8 @@ cncp_analysis(
 \item{mask}{(character) masked ranges (ignore breakpoints in this region)}
 
 \item{simplify}{(logical) simplify the input segments when calling CNCP?}
+
+\item{loose.only}{(logical) only consider the loose ends}
 
 \item{verbose}{(logical) default FALSE}
 }

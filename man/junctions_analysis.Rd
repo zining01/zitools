@@ -6,7 +6,7 @@
 \usage{
 junctions_analysis(
   gg = NULL,
-  gs = NULL,
+  gs = "~/projects/JaBbA_pipeline/db/hcc1954.sv.gs.rds",
   max.dist = 1000,
   method = "jabba",
   id = "sample",

@@ -9,6 +9,7 @@ grab_segs(
   gr = "/dev/null",
   bw = "/dev/null",
   csv = "/dev/null",
+  df = "/dev/null",
   field = "cn",
   simplify = TRUE,
   verbose = FALSE
@@ -22,6 +23,8 @@ grab_segs(
 \item{bw}{(character) path to bigWig (.bw)}
 
 \item{csv}{(character) path to delimited file coercible to GRanges}
+
+\item{df}{(character) path to data.frame object}
 
 \item{simplify}{(logical) default TRUE. Merge adjacent ranges with the same copy number?}
 

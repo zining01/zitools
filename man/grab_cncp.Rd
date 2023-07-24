@@ -4,7 +4,7 @@
 \alias{grab_cncp}
 \title{grab_cncp}
 \usage{
-grab_cncp(gr = NULL, include.na = TRUE, verbose = FALSE)
+grab_cncp(gr = NULL, ignore.strand = FALSE, include.na = TRUE, verbose = FALSE)
 }
 \arguments{
 \item{gr}{(GRanges) with metadata field $cn}
@@ -17,5 +17,5 @@ grab_cncp(gr = NULL, include.na = TRUE, verbose = FALSE)
 GRanges each with width 1 giving CN change points
 }
 \description{
-get copy number changepoints from simplifed CN segmentation
+copy number changepoints from simplifed CN segmentation
 }

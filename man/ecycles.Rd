@@ -6,13 +6,18 @@
 \usage{
 ecycles(
   junctions = NULL,
+  jj = NULL,
+  grl = NULL,
   tfield = "tier",
   jabba_rds = NULL,
-  small.inv = FALSE,
+  small.inv = TRUE,
   thresh = 10000,
   min.span = 10000,
+  min.length = 2,
   chunksize = 1e+30,
   tier2.only = TRUE,
+  path = FALSE,
+  standard.only = TRUE,
   mc.cores = 1,
   verbose = FALSE
 )
@@ -20,19 +25,29 @@ ecycles(
 \arguments{
 \item{junctions}{(character) path to junctions file or GRangesList with field tier}
 
+\item{jj}{(Junctions) if supplied, overrides junctions path}
+
+\item{grl}{(GRangesList) if supplied, overrides junctions}
+
 \item{tfield}{(character)}
 
 \item{jabba_rds}{(character) path to JaBbA output}
 
-\item{small.inv}{(logical) allow small inversions? default FALSE}
+\item{small.inv}{(logical) allow small inversions? default TRUE}
 
 \item{thresh}{(numeric) distance threshold for reciprocality, default 1e3 (bp)}
 
 \item{min.span}{(numeric) thres for removing small dups and dels (1e3 bp)}
 
+\item{min.length}{(numeric) min number of unique edges in a cycle/path (default 2)}
+
 \item{chunksize}{(numeric) default 1e30}
 
-\item{tier2.only}{(logical) only keep cycles with at least 1 tier 2 junction}
+\item{tier2.only}{(logical) only keep cycles with at least 1 tier 2 junction (applies to short reads)}
+
+\item{path}{(logical) simple paths instead of cycles? default FALSE}
+
+\item{standard.only}{(logical) default TRUE}
 
 \item{mc.cores}{(numeric) default 1}
 

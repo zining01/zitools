@@ -6,45 +6,54 @@
 \usage{
 grab_loose(
   jabba_rds,
-  coverage = "/dev/null",
-  tumor_coverage = coverage,
-  norm.field = "norm.counts",
+  normal_cov = "/dev/null",
+  tumor_cov = "/dev/null",
   tumor.field = "foreground",
-  cov.pad = 1e+05,
-  mask = "~/projects/gGnome/files/new.mask.rds",
-  mask_pad = 10000,
-  bad_thresh = NA,
+  norm.field = "foreground",
+  mask = "~/projects/gGnome/files/zc_stash/tile.mask.rds",
+  bp.mask = "/dev/null",
+  mask_pad = 0,
   norm_thresh = 0.6,
-  corr_thresh = 1,
-  min_size = 50000,
-  subset = FALSE,
+  bg_thresh = 0.3,
+  min_size = 0,
+  purity = NULL,
+  ploidy = NULL,
+  chrsub = TRUE,
   verbose = TRUE
 )
 }
 \arguments{
 \item{jabba_rds}{(character) path to JaBbA}
 
-\item{coverage}{(character) path to coverage file with gc-adjusted counts}
+\item{normal_cov}{(character) path to coverage file with gc-adjusted counts}
 
-\item{norm.field}{(character) normal count field (norm.counts)}
+\item{tumor_cov}{(character) path to dryclean with background}
 
-\item{tumor.field}{(character) coverage field (ratio)}
+\item{tumor.field}{(character) background coverage field (background)}
+
+\item{norm.field}{(character) normal count field (reads.corrected)}
 
 \item{mask}{(character) path to coverage mask}
 
-\item{mask_pad}{(numeric) pad on distance to mask}
+\item{bp.mask}{(character) path to coverage mask}
 
-\item{bad_thresh}{(numeric) default NA (skip this)}
+\item{mask_pad}{(numeric) pad on distance to mask (in practice just for annotation purposes)}
 
 \item{norm_thresh}{(numeric) 0.6 (from filter.loose)}
 
-\item{corr_thresh}{(numeric) 0.5 autocorrelation threshold}
+\item{bg_thresh}{(numeric) 0.9 threshold for germline CN change}
 
 \item{min_size}{(numeric) minimum size in BP}
 
-\item{subset}{(logical) subset loose ends to include only valid ones before returning}
+\item{purity}{(numeric) tumor purity}
+
+\item{ploidy}{(numeric) tumor ploidy}
+
+\item{chrsub}{(logical) remove chr prefix of coverage? default TRUE but should be FALSE if running hg38}
 
 \item{verbose}{(logical)}
+
+\item{subset}{(logical) subset loose ends to include only valid ones before returning}
 }
 \description{
 grab_loose

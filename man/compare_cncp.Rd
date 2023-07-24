@@ -4,7 +4,13 @@
 \alias{compare_cncp}
 \title{compare_cncp}
 \usage{
-compare_cncp(gr = NULL, gs = NULL, max.dist = 1000, verbose = FALSE)
+compare_cncp(
+  gr = NULL,
+  gs = NULL,
+  max.dist = 1000,
+  verbose = FALSE,
+  ignore.strand = FALSE
+)
 }
 \arguments{
 \item{gr}{(GRanges) test CN change points}

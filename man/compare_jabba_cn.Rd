@@ -11,7 +11,7 @@ compare_jabba_cn(
   field2 = "cn",
   id = "sample",
   tile.width = 10000,
-  min.width = 1000,
+  min.width = 10000,
   verbose = FALSE
 )
 }

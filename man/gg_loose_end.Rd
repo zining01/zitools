@@ -4,12 +4,18 @@
 \alias{gg_loose_end}
 \title{gg_loose_end}
 \usage{
-gg_loose_end(jabba_rds = NA_character_, return.type = "GRanges")
+gg_loose_end(
+  jabba_rds = NA_character_,
+  return.type = "GRanges",
+  std.chrs = TRUE
+)
 }
 \arguments{
 \item{jabba_rds}{(character) path to jabba output}
 
 \item{return.type}{(character) one of GRanges, data.table}
+
+\item{std.chrs}{(logical) return only loose ends on standard chromosomes}
 }
 \value{
 loose ends of a JaBbA graph as GRanges

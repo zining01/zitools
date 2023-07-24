@@ -18,6 +18,7 @@ data.table with columns:
 - loose.index
 - fused.node.id
 - unfused.node.id
+- fused.side
 }
 \description{
 fused_unfused

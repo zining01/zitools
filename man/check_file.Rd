@@ -13,5 +13,5 @@ check_file(fn = NULL)
 logical, TRUE if file exists and is nonempty
 }
 \description{
-check_file
+Check if file supplied is nonempty
 }

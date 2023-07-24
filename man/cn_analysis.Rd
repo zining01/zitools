@@ -6,22 +6,35 @@
 \usage{
 cn_analysis(
   seg = NULL,
+  field = "cn",
   gr = NULL,
-  gs = NULL,
+  gs = "~/projects/JaBbA_pipeline/db/hcc1954.cn.array.new.rds",
+  gs.field = "cn",
+  gs.method = "gr",
   method = "jabba",
   id = "sample",
   tile.width = 10000,
   min.width = 1000,
-  mask = "~/projects/gGnome/files/new.mask.rds",
+  mask = "~/projects/gGnome/files/zc_stash/maskA_re.rds",
+  allelic = FALSE,
+  cnloh = FALSE,
+  loh = FALSE,
+  cnv = FALSE,
   verbose = FALSE
 )
 }
 \arguments{
 \item{seg}{(character) path to seg file}
 
+\item{field}{(character) field(s) containing CN (or allelic CN) values}
+
 \item{gr}{(GRanges) allow GRanges input directly}
 
 \item{gs}{(character) path to gold standard segs}
+
+\item{gs.field}{(character) CN/allelic CN fields in the gold standard}
+
+\item{gs.method}{(character) data type of gold standard (gg or gr)}
 
 \item{method}{(character) analysis method (one of jabba, ascat)}
 
@@ -33,10 +46,18 @@ cn_analysis(
 
 \item{mask}{(character) path to coverage mask}
 
+\item{allelic}{(logical) run allelic (as opposed to total CN) analysis ? default FALSE}
+
+\item{cnloh}{(logical) CNLOH analysis? (e.g. get precision, recall, F1 for cnloh detection). default FALSE}
+
+\item{loh}{(logical) LOH analysis? (e.g. get precision, recall, F1 for cnloh detection). default FALSE}
+
+\item{cnv}{(logical) focus analysis exclusively on CNV regions (as opposed to genome-wide) (default FALSE)}
+
 \item{verbose}{(logical) default FALSE}
 }
 \value{
-list with entries $cncp.gr $cncp.res
+list with entries $cn.gr $cn.res
 }
 \description{
 This is a function that compares segment CNs to a gold standard.
